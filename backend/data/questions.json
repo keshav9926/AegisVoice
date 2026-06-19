@@ -1,0 +1,62 @@
+[
+  {
+    "id": "q1",
+    "topic": "React State Management",
+    "question": "Can you explain the main differences between using the React Context API and a dedicated state management library like Redux? In what scenarios would you choose one over the other?",
+    "idealAnswer": "A strong answer should highlight: 1. React Context is a dependency injection tool, not a full state management solution. It passes data down the component tree to avoid prop-drilling. 2. Redux is a full state management system featuring a centralized store, actions, reducers, and middleware (like Thunk or Saga). 3. Performance: Context API triggers a re-render of all consumer components when its value changes, which can lead to performance bottlenecks for highly dynamic or frequent state updates. Redux allows components to select specific slices of state and only re-render when those specific slices change. 4. DevTools: Redux provides time-travel debugging and powerful state tracking. 5. Choice: Choose Context for static or low-frequency updates (themes, user auth info). Choose Redux (or Zustand/Recoil) for complex, high-frequency, or globally distributed application state."
+  },
+  {
+    "id": "q2",
+    "topic": "REST vs GraphQL",
+    "question": "What are the primary differences between REST and GraphQL? How do they handle issues like over-fetching and under-fetching of data?",
+    "idealAnswer": "A strong answer should highlight: 1. REST uses fixed endpoints (e.g., /api/users) where the server determines the shape of the response. GraphQL uses a single endpoint (typically /graphql) where the client specifies the exact fields it needs in a query. 2. Over-fetching (getting more data than needed) and Under-fetching (not getting enough, requiring multiple sequential API calls) are common problems in REST because of its fixed payloads. GraphQL solves this by allowing clients to request exactly what they need in a single round-trip. 3. Schema & Type Safety: GraphQL utilizes a strongly-typed schema (SDL) that serves as a contract between frontend and backend. 4. Caching: REST leverages standard HTTP caching mechanisms (like ETags, Cache-Control) at the protocol level. GraphQL caching is more complex because it uses POST requests and a single endpoint, requiring client-side normalization libraries (like Apollo Client cache)."
+  },
+  {
+    "id": "q3",
+    "topic": "Database Indexing",
+    "question": "How does database indexing work under the hood, and what are the trade-offs associated with creating multiple indexes on a table?",
+    "idealAnswer": "A strong answer should highlight: 1. Under the hood: Indexes are data structures (typically B-Trees or B+ Trees, and sometimes Hash indexes) that store pointers to the physical rows in a table. They allow the database engine to find records in logarithmic time O(log N) instead of performing a full table scan O(N). 2. Read Performance: Indexes drastically speed up read queries (SELECT statements with WHERE, JOIN, or ORDER BY clauses). 3. Write Performance Trade-off: Every index must be updated whenever a write operation (INSERT, UPDATE, DELETE) occurs. Consequently, too many indexes slow down write performance. 4. Storage Trade-off: Indexes consume additional disk space and memory (buffer pool). 5. Strategy: Indexes should be created selectively on columns frequently used in filtering, joining, or sorting, rather than indexing every column."
+  },
+  {
+    "id": "q4",
+    "topic": "Web Security: XSS vs CSRF",
+    "question": "What is the difference between Cross-Site Scripting (XSS) and Cross-Site Request Forgery (CSRF)? How can developer mitigate these vulnerabilities in a modern web application?",
+    "idealAnswer": "A strong answer should highlight: 1. XSS (Cross-Site Scripting): Involves injecting malicious client-side scripts (usually JavaScript) into a trusted website, which then execute in the victim's browser. Mitigation: Sanitize and escape all user inputs, use Content Security Policy (CSP) headers, and use HttpOnly cookies for session tokens so JS cannot access them. 2. CSRF (Cross-Site Request Forgery): Tricks a victim's authenticated browser into executing unwanted actions on a web app where they are currently logged in. The attacker exploits the browser's automatic inclusion of cookies. Mitigation: Use anti-CSRF tokens (unique, stateful tokens verified by the server), or set the SameSite attribute on cookies to 'Strict' or 'Lax' to prevent cross-site transmission. 3. Core Difference: XSS exploits the trust a user has in a website; CSRF exploits the trust a website has in a user's browser/session."
+  },
+  {
+    "id": "q5",
+    "topic": "JavaScript Event Loop",
+    "question": "Explain how the JavaScript event loop works. What is the difference between the microtask queue and the macrotask queue (task queue), and how do Promises fit in?",
+    "idealAnswer": "A strong answer should highlight: 1. Single Threaded: JavaScript is single-threaded (executes one thing at a time) and non-blocking, managed by the Event Loop. 2. Execution Stack: Synchronous code runs first in the call stack. 3. Queues: Asynchronous operations (like setTimeouts, network requests, Promises) are handled by Web APIs and their callbacks are placed in queues. 4. Microtask Queue: Includes Promise callbacks (.then, .catch, .finally) and process.nextTick (in Node). 5. Macrotask Queue: Includes setTimeout, setInterval, setImmediate, and I/O tasks. 6. Event Loop execution order: The event loop checks the Call Stack. If the stack is empty, it first processes *all* available microtasks in the microtask queue before moving to the next macrotask in the macrotask queue. Each macrotask run is followed by flushing the entire microtask queue again."
+  },
+  {
+    "id": "q6",
+    "topic": "CORS (Cross-Origin Resource Sharing)",
+    "question": "What is CORS (Cross-Origin Resource Sharing)? Explain what a 'preflight request' is and why the browser sends it.",
+    "idealAnswer": "A strong answer should highlight: 1. CORS is a browser security mechanism that restricts web pages from making requests to a different domain than the one that served the page. 2. Same-Origin Policy: By default, browsers block cross-origin HTTP requests for security. CORS headers (like Access-Control-Allow-Origin) allow servers to declare which origins are permitted. 3. Preflight Request: An HTTP OPTIONS request sent automatically by the browser prior to the actual request. 4. Purpose: It checks if the server understands and permits the incoming cross-origin request method, headers, and credentials, preventing potentially unsafe operations on the server. 5. Trigger: Preflight is triggered for 'non-simple' requests (e.g., requests with Content-Type 'application/json', custom headers, or methods other than GET, HEAD, or POST)."
+  },
+  {
+    "id": "q7",
+    "topic": "React Virtual DOM & Reconciliation",
+    "question": "How does React's Virtual DOM work? Can you describe the reconciliation process and why the 'key' prop is important when rendering lists?",
+    "idealAnswer": "A strong answer should highlight: 1. Virtual DOM: A lightweight, in-memory representation of the real DOM. 2. Reconciliation: When state or props change, React builds a new Virtual DOM tree and compares it with the previous one (a process called 'diffing'). 3. Efficient Diffing: React uses a heuristic O(N) algorithm (instead of O(N^3)) based on assumptions like different element types produce different trees. 4. Batching & Patching: React calculates the minimum set of changes needed and updates only those specific parts in the real DOM (batching modifications). 5. Key Prop: The 'key' prop helps React identify which list items have changed, been added, or been removed. Without unique keys, React might re-render or recreate elements unnecessarily, causing bugs like losing input focus or resetting local component state."
+  },
+  {
+    "id": "q8",
+    "topic": "REST API Design & HTTP Status Codes",
+    "question": "What makes an HTTP method 'idempotent'? Give examples of idempotent vs non-idempotent methods, and state the appropriate HTTP status codes to return when a resource is successfully created, when validation fails, and when a server error occurs.",
+    "idealAnswer": "A strong answer should highlight: 1. Idempotency: An HTTP method is idempotent if making multiple identical requests has the same effect on the server state as making a single request. 2. Idempotent Methods: GET (read only), PUT (replaces resource entirely), DELETE (removes resource), OPTIONS. 3. Non-idempotent Methods: POST (submitting multiple times creates multiple records), PATCH (can be non-idempotent, e.g., if it appends value to an array). 4. Status Codes: Created successfully: 201 Created. Validation/Client error: 400 Bad Request. Unauthenticated: 401 Unauthorized. Forbidden: 403 Forbidden. Server error: 500 Internal Server Error. Success (no content): 204 No Content."
+  },
+  {
+    "id": "q9",
+    "topic": "CSS Layouts: Flexbox vs Grid",
+    "question": "Compare CSS Flexbox and CSS Grid. When would you design a layout using Flexbox, and when would you choose CSS Grid?",
+    "idealAnswer": "A strong answer should highlight: 1. Dimensionality: Flexbox is primarily one-dimensional (handles layouts along either a single row OR a single column). Grid is two-dimensional (handles rows AND columns simultaneously). 2. Layout-First vs Content-First: Flexbox is content-first (items size themselves and the layout adjusts). Grid is layout-first (you define the grid structure first, then place items inside cells). 3. Overlap: Grid makes it easy to overlap elements using grid-area, which is harder in Flexbox. 4. Alignment: Flexbox is great for aligning items along an axis (e.g., a navigation bar with spaced items). 5. Choice: Use Flexbox for linear layouts like navbars, lists, card content, or small components. Use Grid for page-level layouts, dashboard layouts, image galleries, or anywhere you need precise alignment in both rows and columns."
+  },
+  {
+    "id": "q10",
+    "topic": "System Design: Caching Strategies",
+    "question": "What is caching in system design? Describe the difference between Cache-Aside and Write-Through caching strategies, and mention one strategy to handle cache invalidation.",
+    "idealAnswer": "A strong answer should highlight: 1. Caching: Storing copy of data in a high-speed data access layer (like Redis, Memcached, or browser cache) to serve requests faster and reduce load on databases. 2. Cache-Aside: The application checks the cache first. If a cache miss occurs, it queries the database, writes the result to the cache, and returns it. Easy to implement, but cache can become stale if database is updated directly. 3. Write-Through: The application writes data to the cache first, and the cache immediately writes it to the database. Ensures data is always fresh, but introduces write latency and writes unused data. 4. Cache Invalidation: Crucial because 'there are only two hard things in Computer Science: cache invalidation and naming things.' Strategies include Time-to-Live (TTL) expiration, Cache Eviction policies (e.g., LRU - Least Recently Used), or explicit Purging/Invalidating the cache key when a write happens."
+  }
+]
