@@ -22,7 +22,7 @@ AegisVoice is a professional voice-based technical interview agent that conducts
 
 ```text
 ├── backend/
-│   ├── data/
+│   ├── data/ 
 │   │   └── questions.json     # Grounded Q&A Reference Database
 │   ├── temp/                  # Temp storage for STT audio processing
 │   ├── package.json
@@ -60,33 +60,39 @@ OPENAI_API_KEY=your_actual_openai_api_key_here
 
 *Note: If you do not want to hardcode the API key in the server, you can input it securely inside the web application's **Settings Modal** (cog icon in the top right), which saves it locally in your browser's `localStorage`.*
 
-### 3. Start the Backend Server
-From the root directory:
+### 3. Alternative: Run as a Unified Single-Port Application (Recommended for Production)
+Rather than launching two servers locally, you can compile the React frontend and let the Node.js server host both the frontend files and the backend API on the same port (`5000`):
 
 ```bash
-cd backend
-npm install
+# From the root directory:
+npm run build
 npm run start
 ```
+Now, open your browser and navigate directly to **[http://localhost:5000](http://localhost:5000)**. 
 
-The server will start on [http://localhost:5000](http://localhost:5000).
+---
 
-### 4. Start the Frontend Dev Server
-In a new terminal window, from the root directory:
+## ☁️ Production Deployment Guide
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+AegisVoice is pre-configured to be deployed as a **single Node.js service** on platforms like **Render**, **Railway**, or **Heroku**. This is enabled by our root-level `package.json` coordinating building both packages, and the backend Express server serving the resulting static files.
 
-Vite will boot up and host the application at [http://localhost:5173/](http://localhost:5173/).
+### Deploying to Render (Free Web Service)
+1.  Sign in to **[Render](https://render.com/)** and click **New > Web Service**.
+2.  Connect your GitHub repository: `https://github.com/keshav9926/AegisVoice.git`.
+3.  Configure the service with these settings:
+    *   **Runtime**: `Node`
+    *   **Build Command**: `npm run build`
+    *   **Start Command**: `npm run start`
+4.  Add your environment variables under the **Environment** tab:
+    *   `PORT`: `10000` (Render's default port, or leave blank)
+    *   `OPENAI_API_KEY`: *[Your OpenAI API Key]* (Optional: You can also leave this blank and let candidates input their keys directly in the frontend Settings cog, saving you API costs!).
+5.  Click **Deploy Web Service**. Render will automatically run the build script, compile the React assets, and host the fully functioning voice agent under a free SSL-secured URL.
 
 ---
 
 ## 💡 How to Test the Agent
 
-1.  **Launch the UI**: Open [http://localhost:5173/](http://localhost:5173/) in your web browser (Google Chrome or Microsoft Edge recommended for built-in speech recognition support).
+1.  **Launch the UI**: Open [http://localhost:5173/](http://localhost:5173/) (local Vite dev) or [http://localhost:5000](http://localhost:5000) (local unified) in your web browser (Google Chrome or Microsoft Edge recommended for built-in speech recognition support).
 2.  **No API Key Mode (Quick Start)**:
     *   Set the **Interviewer Voice Engine** to **Web Speech API** on the Welcome screen.
     *   Click **Start Interview Practice**.
@@ -104,3 +110,4 @@ Vite will boot up and host the application at [http://localhost:5173/](http://lo
     *   During the interview, watch the **Grounding Engine Logs** sidebar. It displays the exact question, ideal criteria, and live evaluation keywords the LLM is utilizing to assess your voice answer.
 6.  **Get Feedback**:
     *   Answer the questions. Once you finish (or click **Complete & Evaluate**), you will see the **Feedback Dashboard** displaying your scores, summaries, strengths, and accordion dropdowns comparing your transcribed speech with the target answer sheet.
+

@@ -5,7 +5,10 @@ import {
   ArrowLeft, Edit3, Save, RefreshCw, Eye, EyeOff, BookOpen, Sparkles
 } from 'lucide-react';
 
-const API_BASE_URL = 'http://localhost:5000';
+const API_BASE_URL = window.location.origin.includes('localhost:5173')
+  ? 'http://localhost:5000'
+  : window.location.origin;
+
 
 function App() {
   // --- STATE VARIABLES ---

@@ -320,7 +320,23 @@ Return a structured JSON report matching this schema:
   }
 });
 
+// Serve static files from the React app build folder if it exists
+const frontendBuildPath = path.join(__dirname, '../frontend/dist');
+if (fs.existsSync(frontendBuildPath)) {
+  app.use(express.static(frontendBuildPath));
+  
+  // Handle SPA routing - return index.html for all other non-API routes
+  app.get('*', (req, res, next) => {
+    if (!req.path.startsWith('/api')) {
+      res.sendFile(path.join(frontendBuildPath, 'index.html'));
+    } else {
+      next();
+    }
+  });
+}
+
 // Start Server
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
