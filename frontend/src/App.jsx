@@ -5,7 +5,7 @@ import {
   ArrowLeft, Edit3, Save, RefreshCw, Eye, EyeOff, BookOpen, Sparkles
 } from 'lucide-react';
 
-const API_BASE_URL = window.location.origin.includes('localhost:5173')
+const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? 'http://localhost:5000'
   : window.location.origin;
 
@@ -25,6 +25,8 @@ function App() {
   const [voiceEngine, setVoiceEngine] = useState('browser'); // openai | browser
   const [sttEngine, setSttEngine] = useState('browser'); // whisper | browser
   const [voiceName, setVoiceName] = useState('alloy'); // alloy, echo, fable, onyx, nova, shimmer for OpenAI
+  const [availableVoices, setAvailableVoices] = useState([]);
+  const [selectedBrowserVoice, setSelectedBrowserVoice] = useState(() => localStorage.getItem('selected_browser_voice') || '');
   
   // Status states
   const [isRecording, setIsRecording] = useState(false);
@@ -75,6 +77,7 @@ function App() {
   const accumulatedSpeechTextRef = useRef('');
   const speechRestartCountRef = useRef(0);
   const lastSpeechRestartTimeRef = useRef(0);
+  const synthesisIntervalRef = useRef(null);
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -84,6 +87,26 @@ function App() {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       console.warn('SpeechRecognition is not supported in this browser.');
+    }
+
+    // Load available voices for Browser Synthesis
+    const updateVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      setAvailableVoices(voices);
+      if (voices.length > 0 && !localStorage.getItem('selected_browser_voice')) {
+        const defaultVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Google')) ||
+                             voices.find(v => v.lang.startsWith('en')) || 
+                             voices[0];
+        if (defaultVoice) {
+          setSelectedBrowserVoice(defaultVoice.name);
+          localStorage.setItem('selected_browser_voice', defaultVoice.name);
+        }
+      }
+    };
+
+    updateVoices();
+    if (window.speechSynthesis.onvoiceschanged !== undefined) {
+      window.speechSynthesis.onvoiceschanged = updateVoices;
     }
   }, []);
 
@@ -155,23 +178,39 @@ function App() {
       const utterance = new SpeechSynthesisUtterance(text);
       activeUtteranceRef.current = utterance; // Prevent garbage collection (Chromium bug)
       
-      // 3. Find English voice
-      const voices = window.speechSynthesis.getVoices();
-      const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Google')) ||
-                            voices.find(v => v.lang.startsWith('en')) || 
-                            voices[0];
+      // 3. Find selected or preferred voice
+      const preferredVoice = availableVoices.find(v => v.name === selectedBrowserVoice) ||
+                            availableVoices.find(v => v.lang.startsWith('en') && v.name.includes('Google')) ||
+                            availableVoices.find(v => v.lang.startsWith('en')) || 
+                            availableVoices[0];
       if (preferredVoice) utterance.voice = preferredVoice;
+
+      // Keep-alive timer to prevent Chrome SpeechSynthesis boundary bugs (sudden pausing after 15s)
+      synthesisIntervalRef.current = setInterval(() => {
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.pause();
+          window.speechSynthesis.resume();
+        }
+      }, 10000);
 
       // 4. Setup safety timeout in case browser never fires onend
       const safetyDuration = Math.max(8000, text.length * 80); 
       const safetyTimeout = setTimeout(() => {
         console.warn('SpeechSynthesis safety timeout triggered.');
+        if (synthesisIntervalRef.current) {
+          clearInterval(synthesisIntervalRef.current);
+          synthesisIntervalRef.current = null;
+        }
         setIsPlayingVoice(false);
         setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
       }, safetyDuration);
       
       utterance.onend = () => {
         clearTimeout(safetyTimeout);
+        if (synthesisIntervalRef.current) {
+          clearInterval(synthesisIntervalRef.current);
+          synthesisIntervalRef.current = null;
+        }
         setIsPlayingVoice(false);
         setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
       };
@@ -179,6 +218,10 @@ function App() {
       utterance.onerror = (e) => {
         console.error('SpeechSynthesis error:', e);
         clearTimeout(safetyTimeout);
+        if (synthesisIntervalRef.current) {
+          clearInterval(synthesisIntervalRef.current);
+          synthesisIntervalRef.current = null;
+        }
         setIsPlayingVoice(false);
         setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
       };
@@ -238,6 +281,10 @@ function App() {
   };
 
   const stopVoicePlayback = () => {
+    if (synthesisIntervalRef.current) {
+      clearInterval(synthesisIntervalRef.current);
+      synthesisIntervalRef.current = null;
+    }
     if (voiceEngine === 'browser') {
       window.speechSynthesis.cancel();
     } else if (currentAudioRef.current) {
@@ -978,14 +1025,14 @@ function App() {
             </div>
 
             {/* Microphone and Submission Controls */}
-            <div className="card controls-card">
+            <div className="card controls-card" style={{ position: 'relative' }}>
               <div>
                 <button className="btn btn-secondary" onClick={() => setShowTextFallback(!showTextFallback)}>
                   {showTextFallback ? 'Hide Text Fallback' : 'Type Instead'}
                 </button>
               </div>
 
-              <div className="mic-button-container">
+              <div className="mic-button-container" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <button 
                   className={`mic-button ${isRecording ? 'recording' : ''}`} 
                   onClick={isRecording ? stopRecording : startRecording}
@@ -993,6 +1040,18 @@ function App() {
                 >
                   {isRecording ? <Square size={24} /> : <Mic size={24} />}
                 </button>
+                {isThinking && (
+                  <button 
+                    className="btn btn-outline" 
+                    style={{ fontSize: '0.7rem', padding: '0.25rem 0.5rem', marginTop: '0.5rem', border: '1px dashed var(--border-color)' }}
+                    onClick={() => {
+                      setIsThinking(false);
+                      setStatusText('Idle');
+                    }}
+                  >
+                    Cancel Request
+                  </button>
+                )}
               </div>
 
               <div>
@@ -1385,16 +1444,48 @@ function App() {
               </div>
 
               <div className="setup-item">
-                <label className="setup-label">OpenAI Voice</label>
-                <select className="setup-select" value={voiceName} onChange={(e) => setVoiceName(e.target.value)}>
-                  <option value="alloy">Alloy (Warm Neutral)</option>
-                  <option value="echo">Echo (Crisp Male)</option>
-                  <option value="fable">Fable (Expressive British)</option>
-                  <option value="onyx">Onyx (Deep Professional)</option>
-                  <option value="nova">Nova (Energetic Female)</option>
-                  <option value="shimmer">Shimmer (Friendly Female)</option>
+                <label className="setup-label">Text-To-Speech Engine</label>
+                <select className="setup-select" value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value)}>
+                  <option value="browser">Browser Native Speech (Zero cost, offline support)</option>
+                  <option value="openai">OpenAI Cloud TTS (Premium human quality, requires key)</option>
                 </select>
               </div>
+
+              {voiceEngine === 'openai' ? (
+                <div className="setup-item">
+                  <label className="setup-label">OpenAI Voice</label>
+                  <select className="setup-select" value={voiceName} onChange={(e) => setVoiceName(e.target.value)}>
+                    <option value="alloy">Alloy (Warm Neutral)</option>
+                    <option value="echo">Echo (Crisp Male)</option>
+                    <option value="fable">Fable (Expressive British)</option>
+                    <option value="onyx">Onyx (Deep Professional)</option>
+                    <option value="nova">Nova (Energetic Female)</option>
+                    <option value="shimmer">Shimmer (Friendly Female)</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="setup-item">
+                  <label className="setup-label">Browser Native Voice</label>
+                  <select 
+                    className="setup-select" 
+                    value={selectedBrowserVoice} 
+                    onChange={(e) => {
+                      setSelectedBrowserVoice(e.target.value);
+                      localStorage.setItem('selected_browser_voice', e.target.value);
+                    }}
+                  >
+                    {availableVoices.length > 0 ? (
+                      availableVoices.map((voice, index) => (
+                        <option key={index} value={voice.name}>
+                          {voice.name} ({voice.lang})
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">Default System Voice</option>
+                    )}
+                  </select>
+                </div>
+              )}
 
               <div className="setup-item">
                 <label className="setup-label">Speech-To-Text Model</label>

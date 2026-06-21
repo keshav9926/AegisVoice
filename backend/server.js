@@ -487,3 +487,24 @@ app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
 
+// Periodic cleanup of temp uploads (older than 1 hour)
+setInterval(() => {
+  try {
+    if (fs.existsSync(UPLOAD_DIR)) {
+      const files = fs.readdirSync(UPLOAD_DIR);
+      const now = Date.now();
+      files.forEach(file => {
+        const filePath = path.join(UPLOAD_DIR, file);
+        const stats = fs.statSync(filePath);
+        // 1 hour = 3600000 ms
+        if (now - stats.mtimeMs > 3600000) {
+          fs.unlinkSync(filePath);
+          console.log(`[CLEANUP] Deleted stale upload file: ${file}`);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('[CLEANUP] Error cleaning stale upload files:', error);
+  }
+}, 600000); // Check every 10 minutes
+
