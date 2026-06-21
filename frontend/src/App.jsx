@@ -67,6 +67,7 @@ function App() {
   
   // Browser SpeechSynthesis / SpeechRecognition
   const recognitionRef = useRef(null);
+  const activeUtteranceRef = useRef(null);
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -169,25 +170,46 @@ function App() {
 
     if (voiceEngine === 'browser') {
       // Browser SpeechSynthesis
-      const utterance = new SpeechSynthesisUtterance(text);
+      // Chrome speech engine fixes:
+      // 1. Cancel previous speech
+      window.speechSynthesis.cancel();
       
-      // Try to find a nice English speaking voice
+      // 2. Create utterance
+      const utterance = new SpeechSynthesisUtterance(text);
+      activeUtteranceRef.current = utterance; // Prevent garbage collection (Chromium bug)
+      
+      // 3. Find English voice
       const voices = window.speechSynthesis.getVoices();
       const preferredVoice = voices.find(v => v.lang.startsWith('en') && v.name.includes('Google')) ||
                             voices.find(v => v.lang.startsWith('en')) || 
                             voices[0];
       if (preferredVoice) utterance.voice = preferredVoice;
+
+      // 4. Setup safety timeout in case browser never fires onend
+      const safetyDuration = Math.max(8000, text.length * 80); 
+      const safetyTimeout = setTimeout(() => {
+        console.warn('SpeechSynthesis safety timeout triggered.');
+        setIsPlayingVoice(false);
+        setStatusText('Idle');
+      }, safetyDuration);
       
       utterance.onend = () => {
-        setIsPlayingVoice(false);
-        setStatusText('Idle');
-      };
-      utterance.onerror = () => {
+        clearTimeout(safetyTimeout);
         setIsPlayingVoice(false);
         setStatusText('Idle');
       };
       
-      window.speechSynthesis.speak(utterance);
+      utterance.onerror = (e) => {
+        console.error('SpeechSynthesis error:', e);
+        clearTimeout(safetyTimeout);
+        setIsPlayingVoice(false);
+        setStatusText('Idle');
+      };
+      
+      // 5. Speak with a small 100ms delay to let the cancel instruction flush the audio stack
+      setTimeout(() => {
+        window.speechSynthesis.speak(utterance);
+      }, 100);
     } else {
       // OpenAI TTS Cloud
       if (!apiKey) {
