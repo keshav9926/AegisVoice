@@ -68,6 +68,7 @@ function App() {
   // Browser SpeechSynthesis / SpeechRecognition
   const recognitionRef = useRef(null);
   const activeUtteranceRef = useRef(null);
+  const latestSpeechTextRef = useRef('');
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -82,20 +83,15 @@ function App() {
       rec.lang = 'en-US';
       
       rec.onresult = (event) => {
-        let interimTranscript = '';
-        let finalTranscript = '';
+        let fullTranscript = '';
         
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript;
-          } else {
-            interimTranscript += event.results[i][0].transcript;
-          }
+        for (let i = 0; i < event.results.length; ++i) {
+          fullTranscript += event.results[i][0].transcript;
         }
         
-        const currentText = finalTranscript || interimTranscript;
-        if (currentText) {
-          setTextAnswer(currentText);
+        if (fullTranscript) {
+          setTextAnswer(fullTranscript);
+          latestSpeechTextRef.current = fullTranscript;
         }
       };
 
@@ -279,6 +275,7 @@ function App() {
     setIsRecording(true);
     setStatusText('Listening');
     setTextAnswer('');
+    latestSpeechTextRef.current = '';
     audioChunksRef.current = [];
 
     if (sttEngine === 'browser' && recognitionRef.current) {
@@ -344,15 +341,16 @@ function App() {
       recognitionRef.current.stop();
       cleanupVisualizer();
       
-      // Submit the text from state
+      // Submit the text from the latest ref to avoid stale closures
       setTimeout(() => {
-        if (textAnswer.trim()) {
-          submitCandidateAnswer(textAnswer);
+        const finalAnswer = latestSpeechTextRef.current;
+        if (finalAnswer.trim()) {
+          submitCandidateAnswer(finalAnswer);
         } else {
           setErrorMessage('No speech detected. Please try again or type your answer.');
           setStatusText('Idle');
         }
-      }, 500);
+      }, 600);
     } else if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
