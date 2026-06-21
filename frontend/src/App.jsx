@@ -74,35 +74,10 @@ function App() {
   useEffect(() => {
     fetchQuestions();
     
-    // Check if Browser SpeechRecognition is supported
+    // Just verify if SpeechRecognition is supported in browser
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const rec = new SpeechRecognition();
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.lang = 'en-US';
-      
-      rec.onresult = (event) => {
-        let fullTranscript = '';
-        
-        for (let i = 0; i < event.results.length; ++i) {
-          fullTranscript += event.results[i][0].transcript;
-        }
-        
-        if (fullTranscript) {
-          setTextAnswer(fullTranscript);
-          latestSpeechTextRef.current = fullTranscript;
-        }
-      };
-
-      rec.onerror = (err) => {
-        console.error('Speech recognition error:', err);
-        if (err.error !== 'no-speech') {
-          setErrorMessage(`Speech recognition error: ${err.error}`);
-        }
-      };
-
-      recognitionRef.current = rec;
+    if (!SpeechRecognition) {
+      console.warn('SpeechRecognition is not supported in this browser.');
     }
   }, []);
 
@@ -186,20 +161,20 @@ function App() {
       const safetyTimeout = setTimeout(() => {
         console.warn('SpeechSynthesis safety timeout triggered.');
         setIsPlayingVoice(false);
-        setStatusText('Idle');
+        setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
       }, safetyDuration);
       
       utterance.onend = () => {
         clearTimeout(safetyTimeout);
         setIsPlayingVoice(false);
-        setStatusText('Idle');
+        setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
       };
       
       utterance.onerror = (e) => {
         console.error('SpeechSynthesis error:', e);
         clearTimeout(safetyTimeout);
         setIsPlayingVoice(false);
-        setStatusText('Idle');
+        setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
       };
       
       // 5. Speak with a small 100ms delay to let the cancel instruction flush the audio stack
@@ -237,13 +212,13 @@ function App() {
 
         audio.onended = () => {
           setIsPlayingVoice(false);
-          setStatusText('Idle');
+          setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
           URL.revokeObjectURL(url);
         };
 
         audio.onerror = () => {
           setIsPlayingVoice(false);
-          setStatusText('Idle');
+          setStatusText(curr => curr === 'Speaking' ? 'Idle' : curr);
           URL.revokeObjectURL(url);
         };
 
@@ -278,15 +253,45 @@ function App() {
     latestSpeechTextRef.current = '';
     audioChunksRef.current = [];
 
-    if (sttEngine === 'browser' && recognitionRef.current) {
+    if (sttEngine === 'browser') {
       try {
-        recognitionRef.current.start();
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+          throw new Error('Browser Speech Recognition is not supported by your browser. Please use Google Chrome or Microsoft Edge.');
+        }
+
+        const rec = new SpeechRecognition();
+        rec.continuous = true;
+        rec.interimResults = true;
+        rec.lang = 'en-US';
+
+        rec.onresult = (event) => {
+          let fullTranscript = '';
+          for (let i = 0; i < event.results.length; ++i) {
+            fullTranscript += event.results[i][0].transcript;
+          }
+          if (fullTranscript) {
+            setTextAnswer(fullTranscript);
+            latestSpeechTextRef.current = fullTranscript;
+          }
+        };
+
+        rec.onerror = (err) => {
+          console.error('Speech recognition error:', err);
+          if (err.error !== 'no-speech') {
+            setErrorMessage(`Speech recognition error: ${err.error}`);
+          }
+        };
+
+        recognitionRef.current = rec;
+        rec.start();
+
         // Access microphone stream for live canvas visualizer
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         visualize(stream);
       } catch (err) {
-        console.error('Mic permission denied for visualizer:', err);
-        setErrorMessage('Microphone access is required to record speech.');
+        console.error('Mic permission or initialization denied:', err);
+        setErrorMessage(err.message || 'Microphone access is required to record speech.');
         setIsRecording(false);
         setStatusText('Idle');
       }
