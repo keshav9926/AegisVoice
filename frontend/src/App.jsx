@@ -72,6 +72,8 @@ function App() {
   const latestSpeechTextRef = useRef('');
   const isRecordingRef = useRef(false);
   const accumulatedSpeechTextRef = useRef('');
+  const speechRestartCountRef = useRef(0);
+  const lastSpeechRestartTimeRef = useRef(0);
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -256,6 +258,8 @@ function App() {
     setTextAnswer('');
     latestSpeechTextRef.current = '';
     accumulatedSpeechTextRef.current = '';
+    speechRestartCountRef.current = 0;
+    lastSpeechRestartTimeRef.current = 0;
     audioChunksRef.current = [];
 
     if (sttEngine === 'browser') {
@@ -295,12 +299,28 @@ function App() {
           console.log('Speech recognition service disconnected.');
           // Auto-restart if we are still supposed to be recording
           if (isRecordingRef.current) {
-            console.log('Auto-restarting speech recognition to maintain session.');
-            accumulatedSpeechTextRef.current = latestSpeechTextRef.current;
-            try {
-              rec.start();
-            } catch (e) {
-              console.error('SpeechRecognition auto-restart failed:', e);
+            const now = Date.now();
+            // Reset counter if last restart was more than 10s ago
+            if (now - lastSpeechRestartTimeRef.current > 10000) {
+              speechRestartCountRef.current = 0;
+            }
+
+            if (speechRestartCountRef.current < 3) {
+              speechRestartCountRef.current += 1;
+              lastSpeechRestartTimeRef.current = now;
+              console.log(`Auto-restarting speech recognition (Retry ${speechRestartCountRef.current}/3)...`);
+              accumulatedSpeechTextRef.current = latestSpeechTextRef.current;
+              try {
+                rec.start();
+              } catch (e) {
+                console.error('SpeechRecognition auto-restart failed:', e);
+              }
+            } else {
+              console.warn('Max speech recognition auto-restarts reached due to persistent errors.');
+              setErrorMessage('Continuous speech recognition issues detected. Please check your network connection, refresh, or use the "Type Instead" fallback.');
+              setIsRecording(false);
+              isRecordingRef.current = false;
+              setStatusText('Idle');
             }
           }
         };
