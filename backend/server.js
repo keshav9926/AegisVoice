@@ -147,11 +147,12 @@ const performSandboxEvaluation = (candidateAnswer, currentQuestion, nextQuestion
   // Count matches
   const matches = keywords.filter(word => answerLower.includes(word));
   
-  // Calculate a score (base 40% + 15% per matched keyword, capped at 100)
-  const score = Math.min(40 + (matches.length * 15), 100);
+  // Calculate a score (base 15% + 15% per matched keyword, capped at 100)
+  const score = Math.min(15 + (matches.length * 15), 100);
 
-  // Transition if score is >= 60 (at least 2 matching key terms) or user answered thoroughly
-  const isTransition = score >= 60 || answerLower.length > 110;
+  // Transition only if the score is >= 60 (at least 3 keywords) AND the answer is descriptive (>= 45 chars),
+  // OR if the candidate answered extremely thoroughly (length > 120 chars).
+  const isTransition = (score >= 60 && answerLower.trim().length >= 45) || answerLower.trim().length > 120;
 
   let replyText = "";
   if (isTransition) {
