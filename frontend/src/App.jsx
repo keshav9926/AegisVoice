@@ -925,44 +925,59 @@ function App() {
 
       {/* --- WELCOME SCREEN --- */}
       {currentScreen === 'welcome' && (
-        <div className="welcome-screen card">
-          <div style={{ marginBottom: '2.5rem' }}>
-            <span className="status-badge" style={{ color: 'var(--color-secondary)', background: 'rgba(6, 182, 212, 0.08)', marginBottom: '1rem' }}>
-              Grounded AI Engine v1.0
-            </span>
-            <h2 className="hero-title">Mock Interviews,<br />Mastered by Voice.</h2>
-            <p className="hero-subtitle">
-              Speak naturally with our grounded AI interviewer. It evaluates your answers in real-time against custom reference keys, offering organic follow-ups, mentoring, and rigorous feedback.
-            </p>
+        <div className="welcome-screen-container">
+          <div className="welcome-screen-left card">
+            <div style={{ marginBottom: '2rem' }}>
+              <span className="status-badge-gold" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', color: 'var(--color-secondary)', background: 'rgba(197, 160, 89, 0.08)', marginBottom: '1.25rem', padding: '0.35rem 0.85rem', borderRadius: '999px', fontSize: '0.75rem', fontWeight: 'bold', border: '1px solid rgba(197, 160, 89, 0.2)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                <Sparkles size={12} /> Grounded AI Interviewer
+              </span>
+              <h2 className="hero-title">Mock Interviews,<br />Mastered by Voice.</h2>
+              <p className="hero-subtitle">
+                Practice technical assessments with an AI interviewer grounded in a fixed Q&A store. Refine responses via custom follow-up questions, contextual coaching, and concept match scores.
+              </p>
+            </div>
+
+            <div className="setup-grid">
+              <div className="setup-item">
+                <label className="setup-label">Interview Length</label>
+                <select className="setup-select" value={interviewLength} onChange={(e) => setInterviewLength(Number(e.target.value))}>
+                  <option value={1}>Short Screening (1 Question)</option>
+                  <option value={3}>Standard Screen (3 Questions)</option>
+                  <option value={5}>Full Mock (5 Questions)</option>
+                  <option value={10}>Deep Technical (All 10 Questions)</option>
+                </select>
+              </div>
+              
+              <div className="setup-item">
+                <label className="setup-label">Interviewer Voice Engine</label>
+                <select className="setup-select" value={voiceEngine} onChange={(e) => {
+                  setVoiceEngine(e.target.value);
+                  setSttEngine(e.target.value === 'openai' ? 'whisper' : 'browser');
+                }}>
+                  <option value="browser">Web Speech API (Zero Latency, Free)</option>
+                  <option value="openai">OpenAI Cloud Engine (Premium Quality)</option>
+                </select>
+              </div>
+            </div>
+
+            <button className="btn btn-primary start-btn-large" onClick={startInterview}>
+              Start Practice Session <Play size={18} />
+            </button>
           </div>
 
-          <div className="setup-grid">
-            <div className="setup-item">
-              <label className="setup-label">Interview Length</label>
-              <select className="setup-select" value={interviewLength} onChange={(e) => setInterviewLength(Number(e.target.value))}>
-                <option value={1}>Short Screening (1 Question - Quick Test)</option>
-                <option value={3}>Standard Screen (3 Questions - Demo Recommended)</option>
-                <option value={5}>Full Mock (5 Questions - Comprehensive)</option>
-                <option value={10}>Deep Technical (All 10 Questions)</option>
-              </select>
-            </div>
-            
-            <div className="setup-item">
-              <label className="setup-label">Interviewer Voice Engine</label>
-              <select className="setup-select" value={voiceEngine} onChange={(e) => {
-                setVoiceEngine(e.target.value);
-                // Pair default STT engine for seamless experience
-                setSttEngine(e.target.value === 'openai' ? 'whisper' : 'browser');
-              }}>
-                <option value="browser">Web Speech API (Zero Latency, Free)</option>
-                <option value="openai">OpenAI TTS & Whisper (Realistic, requires API Key)</option>
-              </select>
+          <div className="welcome-screen-right">
+            <div className="hero-sculpture-wrapper">
+              <div className="orbit-line orbit-1"></div>
+              <div className="orbit-line orbit-2"></div>
+              <div className="orbit-line orbit-3"></div>
+              <div className="hero-sculpture-glow"></div>
+              <img src="/marble_bust.png" alt="Classical Greek Bust" className="hero-sculpture-img" />
+              <div className="sculpture-overlay-text">
+                <h3>Antique parian</h3>
+                <p>AI mock system grounded in reference Q&A</p>
+              </div>
             </div>
           </div>
-
-          <button className="btn btn-primary start-btn-large" onClick={startInterview}>
-            Start Interview Practice <Play size={18} />
-          </button>
         </div>
       )}
 
