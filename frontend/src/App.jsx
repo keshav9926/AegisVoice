@@ -65,6 +65,7 @@ function App() {
   const animationFrameRef = useRef(null);
   const currentAudioRef = useRef(null);
   const chatBottomRef = useRef(null);
+  const micStreamRef = useRef(null);
   
   // Browser SpeechSynthesis / SpeechRecognition
   const recognitionRef = useRef(null);
@@ -345,6 +346,7 @@ function App() {
 
         // Access microphone stream for live canvas visualizer
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStreamRef.current = stream;
         visualize(stream);
       } catch (err) {
         console.error('Mic permission or initialization denied:', err);
@@ -357,6 +359,7 @@ function App() {
       // Whisper Audio Recording via MediaRecorder
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStreamRef.current = stream;
         visualize(stream);
 
         const options = { mimeType: 'audio/webm' };
@@ -529,10 +532,16 @@ function App() {
   const cleanupVisualizer = () => {
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
     }
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
+    }
+    // Release the microphone hardware so the next question gets a fresh stream
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(track => track.stop());
+      micStreamRef.current = null;
     }
   };
 
