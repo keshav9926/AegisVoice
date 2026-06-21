@@ -109,6 +109,69 @@ app.post('/api/questions', (req, res) => {
   }
 });
 
+// Helper to perform local evaluation in Sandbox Mode (without API Key)
+const performSandboxEvaluation = (candidateAnswer, currentQuestion, nextQuestion) => {
+  const answerLower = (candidateAnswer || '').toLowerCase();
+  const topic = (currentQuestion.topic || '').toLowerCase();
+  
+  // Extract key terms based on common topics
+  let keywords = [];
+  if (topic.includes('state') || topic.includes('redux') || topic.includes('context')) {
+    keywords = ['redux', 'context', 'prop', 'render', 'performance', 'store', 'state', 're-render', 'middleware'];
+  } else if (topic.includes('rest') || topic.includes('graphql')) {
+    keywords = ['endpoint', 'graphql', 'query', 'over-fetching', 'under-fetching', 'cache', 'schema', 'rest'];
+  } else if (topic.includes('index') || topic.includes('database')) {
+    keywords = ['index', 'b-tree', 'write', 'read', 'scan', 'performance', 'storage', 'table', 'seek'];
+  } else if (topic.includes('security') || topic.includes('xss') || topic.includes('csrf')) {
+    keywords = ['xss', 'csrf', 'script', 'injection', 'cookie', 'token', 'samesite', 'sanitize'];
+  } else if (topic.includes('loop') || topic.includes('event')) {
+    keywords = ['event', 'loop', 'stack', 'microtask', 'macrotask', 'promise', 'callback', 'queue', 'thread'];
+  } else if (topic.includes('cors')) {
+    keywords = ['cors', 'origin', 'preflight', 'options', 'header', 'browser', 'security'];
+  } else if (topic.includes('virtual dom') || topic.includes('reconciliation') || topic.includes('react')) {
+    keywords = ['virtual', 'dom', 'diffing', 'reconciliation', 'key', 'render', 'list', 'patch'];
+  } else if (topic.includes('idempotent') || topic.includes('status')) {
+    keywords = ['idempotent', 'get', 'put', 'post', 'delete', '201', '400', '500', 'status', 'code'];
+  } else if (topic.includes('flexbox') || topic.includes('grid') || topic.includes('css')) {
+    keywords = ['flexbox', 'grid', 'dimension', 'navbar', 'layout', 'align', 'overlap'];
+  } else if (topic.includes('cache') || topic.includes('system')) {
+    keywords = ['cache', 'redis', 'aside', 'through', 'invalidation', 'ttl', 'database', 'eviction'];
+  } else {
+    keywords = currentQuestion.idealAnswer
+      .toLowerCase()
+      .replace(/[^a-zA-Z\s]/g, '')
+      .split(/\s+/)
+      .filter(w => w.length > 5);
+  }
+
+  // Count matches
+  const matches = keywords.filter(word => answerLower.includes(word));
+  
+  // Calculate a score (base 40% + 15% per matched keyword, capped at 100)
+  const score = Math.min(40 + (matches.length * 15), 100);
+
+  // Transition if score is >= 60 (at least 2 matching key terms) or user answered thoroughly
+  const isTransition = score >= 60 || answerLower.length > 110;
+
+  let replyText = "";
+  if (isTransition) {
+    if (nextQuestion) {
+      replyText = `Understood. You touched on key concepts like ${matches.length > 0 ? matches.slice(0, 3).join(', ') : 'the core mechanisms'}. Let's move on to the next question: ${nextQuestion.question}`;
+    } else {
+      replyText = `Perfect. That wraps up all the questions in our screening list. Thank you for your time. You can now click "Complete & Evaluate" to view your feedback report!`;
+    }
+  } else {
+    replyText = `I see. Could you expand a bit more on this topic? Specifically, how does it relate to ${keywords.slice(0, 2).join(' or ')}?`;
+  }
+
+  return {
+    reply: replyText,
+    evaluation: `[SANDBOX MODE - FREE TRIAL] Candidate answer analyzed for keyword overlap. Matches found: ${matches.length > 0 ? matches.join(', ') : 'none'}. Calculated score: ${score}/100.`,
+    decision: isTransition ? 'transition' : 'follow_up',
+    score: score
+  };
+};
+
 // 3. Orchestrate Interview Turn (Chat)
 app.post('/api/chat', async (req, res) => {
   try {
@@ -127,12 +190,28 @@ app.post('/api/chat', async (req, res) => {
     const currentQuestion = questions[currentQuestionIndex];
     const nextQuestion = currentQuestionIndex + 1 < len ? questions[currentQuestionIndex + 1] : null;
 
-    // Get OpenAI Client
+    // Check for OpenAI API Key, fallback to local sandbox mode if not configured
     let openai;
+    let sandboxMode = false;
     try {
       openai = getOpenAIClient(req);
     } catch (err) {
-      return res.status(401).json({ error: err.message });
+      sandboxMode = true;
+    }
+
+    // Get the latest candidate message text
+    const latestUserMessage = messages
+      .filter(m => m.role === 'user')
+      .slice(-1)[0]?.content || '';
+
+    if (sandboxMode) {
+      const result = performSandboxEvaluation(latestUserMessage, currentQuestion, nextQuestion);
+      return res.json({
+        reply: result.reply,
+        evaluation: result.evaluation,
+        decision: result.decision,
+        groundedQuestion: currentQuestion
+      });
     }
 
     // Format conversation history for prompt
@@ -260,11 +339,72 @@ app.post('/api/feedback', async (req, res) => {
     const questions = readQuestions();
     const len = Math.min(interviewLength || 3, questions.length);
 
+    // Check for OpenAI API Key, fallback to local sandbox mode if not configured
     let openai;
+    let sandboxMode = false;
     try {
       openai = getOpenAIClient(req);
     } catch (err) {
-      return res.status(401).json({ error: err.message });
+      sandboxMode = true;
+    }
+
+    if (sandboxMode) {
+      // Generate a mock report based on keyword matching
+      const questionBreakdown = [];
+      let totalScore = 0;
+
+      // Extract user messages
+      const userAnswers = messages
+        .filter(m => m.role === 'user')
+        .map(m => m.content);
+
+      for (let i = 0; i < len; i++) {
+        const question = questions[i];
+        const candidateAnswer = userAnswers[i] || "No response recorded.";
+        
+        // Evaluate candidate answer using sandbox engine
+        const evalResult = performSandboxEvaluation(candidateAnswer, question, null);
+        
+        // Ensure passing grades feel constructive
+        const finalScore = evalResult.decision === 'transition' ? Math.max(75, evalResult.score) : evalResult.score;
+
+        questionBreakdown.push({
+          question: question.question,
+          topic: question.topic,
+          candidateAnswer: candidateAnswer,
+          referenceAnswer: question.idealAnswer,
+          score: finalScore,
+          feedback: `[SANDBOX MODE] Evaluated without an API key. Your answer matched terms related to ${question.topic}. Match feedback: ${evalResult.evaluation}`
+        });
+
+        totalScore += finalScore;
+      }
+
+      const overallScore = Math.round(totalScore / len);
+      
+      const strengths = [];
+      const improvements = [];
+
+      questionBreakdown.forEach(item => {
+        if (item.score >= 70) {
+          strengths.push(`Showed solid keyword coverage for ${item.topic}.`);
+        } else {
+          improvements.push(`Provide more terminology and details on ${item.topic}.`);
+        }
+      });
+
+      if (strengths.length === 0) strengths.push("Completed the evaluation sequence.");
+      if (improvements.length === 0) improvements.push("Ensure you cover more technical terminology in mock replies.");
+
+      const report = {
+        overallScore,
+        summary: `[SANDBOX EVALUATION] You completed the interview in Sandbox Mode (without a configured API key). The agent graded your answers dynamically based on keyword matches against our reference database. Your keyword coverage score was ${overallScore}%.`,
+        strengths,
+        improvements,
+        questionBreakdown
+      };
+
+      return res.json(report);
     }
 
     const conversationText = messages
