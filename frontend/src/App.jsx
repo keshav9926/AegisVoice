@@ -70,6 +70,8 @@ function App() {
   const recognitionRef = useRef(null);
   const activeUtteranceRef = useRef(null);
   const latestSpeechTextRef = useRef('');
+  const isRecordingRef = useRef(false);
+  const accumulatedSpeechTextRef = useRef('');
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -249,14 +251,16 @@ function App() {
     setErrorMessage('');
     stopVoicePlayback();
     setIsRecording(true);
+    isRecordingRef.current = true;
     setStatusText('Listening');
     setTextAnswer('');
     latestSpeechTextRef.current = '';
+    accumulatedSpeechTextRef.current = '';
     audioChunksRef.current = [];
 
     if (sttEngine === 'browser') {
       try {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const SpeechRecognition = window.webkitSpeechRecognition || window.SpeechRecognition;
         if (!SpeechRecognition) {
           throw new Error('Browser Speech Recognition is not supported by your browser. Please use Google Chrome or Microsoft Edge.');
         }
@@ -267,10 +271,11 @@ function App() {
         rec.lang = 'en-US';
 
         rec.onresult = (event) => {
-          let fullTranscript = '';
+          let currentTurnTranscript = '';
           for (let i = 0; i < event.results.length; ++i) {
-            fullTranscript += event.results[i][0].transcript;
+            currentTurnTranscript += event.results[i][0].transcript;
           }
+          const fullTranscript = (accumulatedSpeechTextRef.current + ' ' + currentTurnTranscript).trim();
           if (fullTranscript) {
             setTextAnswer(fullTranscript);
             latestSpeechTextRef.current = fullTranscript;
@@ -279,8 +284,24 @@ function App() {
 
         rec.onerror = (err) => {
           console.error('Speech recognition error:', err);
-          if (err.error !== 'no-speech') {
+          if (err.error === 'network') {
+            console.warn('SpeechRecognition network glitch. Auto-recovery active.');
+          } else if (err.error !== 'no-speech') {
             setErrorMessage(`Speech recognition error: ${err.error}`);
+          }
+        };
+
+        rec.onend = () => {
+          console.log('Speech recognition service disconnected.');
+          // Auto-restart if we are still supposed to be recording
+          if (isRecordingRef.current) {
+            console.log('Auto-restarting speech recognition to maintain session.');
+            accumulatedSpeechTextRef.current = latestSpeechTextRef.current;
+            try {
+              rec.start();
+            } catch (e) {
+              console.error('SpeechRecognition auto-restart failed:', e);
+            }
           }
         };
 
@@ -294,6 +315,7 @@ function App() {
         console.error('Mic permission or initialization denied:', err);
         setErrorMessage(err.message || 'Microphone access is required to record speech.');
         setIsRecording(false);
+        isRecordingRef.current = false;
         setStatusText('Idle');
       }
     } else {
@@ -339,8 +361,9 @@ function App() {
   };
 
   const stopRecording = () => {
-    if (!isRecording) return;
+    if (!isRecordingRef.current) return;
     setIsRecording(false);
+    isRecordingRef.current = false;
     setStatusText('Thinking');
 
     if (sttEngine === 'browser' && recognitionRef.current) {
