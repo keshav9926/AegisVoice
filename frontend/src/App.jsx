@@ -17,6 +17,7 @@ function App() {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [interviewLength, setInterviewLength] = useState(3);
   const [messages, setMessages] = useState([]);
+  const [activeQuestions, setActiveQuestions] = useState([]);
   
   // API settings
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
@@ -497,11 +498,22 @@ function App() {
     }
     
     setErrorMessage('');
+    
+    // Shuffle helper (Fisher-Yates)
+    const shuffled = [...questions];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    
+    const selectedQuestions = shuffled.slice(0, Math.min(interviewLength, questions.length));
+    setActiveQuestions(selectedQuestions);
+    
     setCurrentQuestionIndex(0);
     setMessages([
       { 
         role: 'assistant', 
-        content: `Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${questions[0].question}` 
+        content: `Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${selectedQuestions[0].question}` 
       }
     ]);
     
@@ -509,7 +521,7 @@ function App() {
     
     // Wait a brief moment for layout/screen to render then play audio
     setTimeout(() => {
-      playVoice(`Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${questions[0].question}`);
+      playVoice(`Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${selectedQuestions[0].question}`);
     }, 400);
   };
 
@@ -534,7 +546,8 @@ function App() {
         body: JSON.stringify({
           messages: updatedMessages,
           currentQuestionIndex,
-          interviewLength
+          interviewLength,
+          activeQuestions
         })
       });
 
@@ -564,7 +577,7 @@ function App() {
       // 4. Handle State Transition
       if (result.decision === 'transition') {
         const nextIndex = currentQuestionIndex + 1;
-        const totalQuestionsToAsk = Math.min(interviewLength, questions.length);
+        const totalQuestionsToAsk = activeQuestions.length;
 
         if (nextIndex < totalQuestionsToAsk) {
           // Transition to next question
@@ -603,7 +616,8 @@ function App() {
         },
         body: JSON.stringify({
           messages,
-          interviewLength
+          interviewLength,
+          activeQuestions
         })
       });
 
@@ -882,7 +896,7 @@ function App() {
               <div className="transcript-header">
                 <span className="transcript-title">Interview Transcript</span>
                 <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                  Question {Math.min(currentQuestionIndex + 1, interviewLength)} of {Math.min(interviewLength, questions.length)}
+                  Question {Math.min(currentQuestionIndex + 1, activeQuestions.length)} of {activeQuestions.length}
                 </span>
               </div>
               
@@ -969,21 +983,21 @@ function App() {
                 <div className="grounding-section">
                   <div className="grounding-section-title">Active Grounding Node</div>
                   <div className="grounding-section-body" style={{ fontWeight: '600', color: 'var(--color-secondary)', fontSize: '0.85rem' }}>
-                    Q{currentQuestionIndex + 1}: {questions[currentQuestionIndex]?.topic || 'Loading...'}
+                    Q{currentQuestionIndex + 1}: {activeQuestions[currentQuestionIndex]?.topic || 'Loading...'}
                   </div>
                 </div>
 
                 <div className="grounding-section">
                   <div className="grounding-section-title">Reference Question</div>
                   <div className="grounding-section-body">
-                    "{questions[currentQuestionIndex]?.question}"
+                    "{activeQuestions[currentQuestionIndex]?.question}"
                   </div>
                 </div>
 
                 <div className="grounding-section">
                   <div className="grounding-section-title">Ideal Reference Answer (Target Keywords)</div>
                   <div className="grounding-section-body" style={{ fontSize: '0.825rem', color: 'var(--text-muted)' }}>
-                    {questions[currentQuestionIndex]?.idealAnswer}
+                    {activeQuestions[currentQuestionIndex]?.idealAnswer}
                   </div>
                 </div>
 

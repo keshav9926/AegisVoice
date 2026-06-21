@@ -175,9 +175,9 @@ const performSandboxEvaluation = (candidateAnswer, currentQuestion, nextQuestion
 // 3. Orchestrate Interview Turn (Chat)
 app.post('/api/chat', async (req, res) => {
   try {
-    const { messages, currentQuestionIndex, interviewLength } = req.body;
-    const questions = readQuestions();
-    const len = Math.min(interviewLength || 3, questions.length);
+    const { messages, currentQuestionIndex, interviewLength, activeQuestions } = req.body;
+    const questions = activeQuestions || readQuestions();
+    const len = questions.length;
 
     if (questions.length === 0) {
       return res.status(400).json({ error: 'No reference questions available. Please add questions first.' });
@@ -336,9 +336,9 @@ app.post('/api/tts', async (req, res) => {
 // 6. Generate Interview Feedback Report
 app.post('/api/feedback', async (req, res) => {
   try {
-    const { messages, interviewLength } = req.body;
-    const questions = readQuestions();
-    const len = Math.min(interviewLength || 3, questions.length);
+    const { messages, interviewLength, activeQuestions } = req.body;
+    const questions = activeQuestions || readQuestions();
+    const len = questions.length;
 
     // Check for OpenAI API Key, fallback to local sandbox mode if not configured
     let openai;
