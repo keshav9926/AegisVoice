@@ -254,7 +254,7 @@ function App() {
     stopVoicePlayback();
     setIsRecording(true);
     isRecordingRef.current = true;
-    setStatusText('Listening');
+    setStatusText('Initializing...');
     setTextAnswer('');
     latestSpeechTextRef.current = '';
     accumulatedSpeechTextRef.current = '';
@@ -273,6 +273,11 @@ function App() {
         rec.continuous = true;
         rec.interimResults = true;
         rec.lang = 'en-US';
+
+        rec.onstart = () => {
+          console.log('Speech recognition service started listening.');
+          setStatusText('Listening');
+        };
 
         rec.onresult = (event) => {
           let currentTurnTranscript = '';
@@ -309,6 +314,7 @@ function App() {
               speechRestartCountRef.current += 1;
               lastSpeechRestartTimeRef.current = now;
               console.log(`Auto-restarting speech recognition (Retry ${speechRestartCountRef.current}/3)...`);
+              setStatusText('Reconnecting...');
               accumulatedSpeechTextRef.current = latestSpeechTextRef.current;
               try {
                 rec.start();
@@ -320,6 +326,15 @@ function App() {
               setErrorMessage('Continuous speech recognition issues detected. Please check your network connection, refresh, or use the "Type Instead" fallback.');
               setIsRecording(false);
               isRecordingRef.current = false;
+              setStatusText('Idle');
+            }
+          } else {
+            // User stopped recording: submit the final collected transcript
+            const finalAnswer = latestSpeechTextRef.current;
+            if (finalAnswer.trim()) {
+              submitCandidateAnswer(finalAnswer);
+            } else {
+              setErrorMessage('No speech detected. Please try again or type your answer.');
               setStatusText('Idle');
             }
           }
@@ -389,17 +404,6 @@ function App() {
     if (sttEngine === 'browser' && recognitionRef.current) {
       recognitionRef.current.stop();
       cleanupVisualizer();
-      
-      // Submit the text from the latest ref to avoid stale closures
-      setTimeout(() => {
-        const finalAnswer = latestSpeechTextRef.current;
-        if (finalAnswer.trim()) {
-          submitCandidateAnswer(finalAnswer);
-        } else {
-          setErrorMessage('No speech detected. Please try again or type your answer.');
-          setStatusText('Idle');
-        }
-      }, 600);
     } else if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
     }
