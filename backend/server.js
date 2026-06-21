@@ -15,254 +15,373 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
 app.use(cors());
 app.use(express.json());
 
-// Set up directories
+// ─── Directory Setup ─────────────────────────────────────────────────────────
 const DATA_DIR = path.join(__dirname, 'data');
 const UPLOAD_DIR = path.join(__dirname, 'temp');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// Multer for file uploads
+// ─── Multer ───────────────────────────────────────────────────────────────────
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, UPLOAD_DIR);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `audio-${Date.now()}${path.extname(file.originalname) || '.webm'}`);
-  }
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) =>
+    cb(null, `audio-${Date.now()}${path.extname(file.originalname) || '.webm'}`)
 });
 const upload = multer({ storage });
 
-// Helper to get OpenAI client
+// ─── In-Memory Session Store ──────────────────────────────────────────────────
+// Each session tracks all state server-side so the frontend cannot manipulate
+// question progression directly.
+//
+// InterviewSession shape:
+// {
+//   sessionId: string,
+//   currentQuestionIndex: number,
+//   followUpCount: number,           // resets per question
+//   activeQuestions: Question[],
+//   transcript: {role, content}[],   // dialogue only (no grading metadata)
+//   perQuestionScores: {             // accumulated during the interview
+//     [questionId]: { score, coveredConcepts, missingConcepts }
+//   },
+//   startedAt: string (ISO)
+// }
+const sessions = new Map();
+
+/** Auto-expire sessions after 2 hours to prevent memory leaks */
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 const getOpenAIClient = (req) => {
-  // Check authorization header first
   const authHeader = req.headers.authorization;
   let apiKey = process.env.OPENAI_API_KEY;
-
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const clientKey = authHeader.substring(7).trim();
     if (clientKey && clientKey !== 'undefined' && clientKey !== 'null') {
       apiKey = clientKey;
     }
   }
-
-  if (!apiKey) {
-    throw new Error('OpenAI API Key is missing. Please provide it in settings or the server .env file.');
-  }
-
+  if (!apiKey) throw new Error('OpenAI API Key is missing. Please provide it in Settings or the server .env file.');
   return new OpenAI({ apiKey });
 };
 
-// Helper to read questions
 const readQuestions = () => {
   try {
-    if (!fs.existsSync(QUESTIONS_FILE)) {
-      return [];
-    }
-    const data = fs.readFileSync(QUESTIONS_FILE, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    console.error('Error reading questions:', error);
+    if (!fs.existsSync(QUESTIONS_FILE)) return [];
+    return JSON.parse(fs.readFileSync(QUESTIONS_FILE, 'utf8'));
+  } catch (err) {
+    console.error('Error reading questions:', err);
     return [];
   }
 };
 
-// Helper to write questions
 const writeQuestions = (questions) => {
   try {
     fs.writeFileSync(QUESTIONS_FILE, JSON.stringify(questions, null, 2), 'utf8');
     return true;
-  } catch (error) {
-    console.error('Error writing questions:', error);
+  } catch (err) {
+    console.error('Error writing questions:', err);
     return false;
   }
 };
 
-// Endpoints
-
-// 1. Get reference questions
-app.get('/api/questions', (req, res) => {
-  const questions = readQuestions();
-  res.json(questions);
-});
-
-// 2. Save reference questions (updates questions.json)
-app.post('/api/questions', (req, res) => {
-  const questions = req.body;
-  if (!Array.isArray(questions)) {
-    return res.status(400).json({ error: 'Invalid data format. Expected an array.' });
+/** Fisher-Yates shuffle */
+const shuffle = (arr) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
   }
-  const success = writeQuestions(questions);
-  if (success) {
-    res.json({ message: 'Questions updated successfully.', questions });
-  } else {
-    res.status(500).json({ error: 'Failed to save questions.' });
-  }
-});
+  return a;
+};
 
-// Helper to perform local evaluation in Sandbox Mode (without API Key)
-const performSandboxEvaluation = (candidateAnswer, currentQuestion, nextQuestion) => {
+/** Detect give-up phrases so backend can force-transition */
+const GIVE_UP_PHRASES = [
+  "i don't know", "i dont know", "skip", "pass", "no idea",
+  "not sure", "i give up", "i'm not sure", "i am not sure", "next question"
+];
+const isGivingUp = (text) =>
+  GIVE_UP_PHRASES.some(p => text.toLowerCase().includes(p));
+
+// ─── Sandbox Evaluator (no API key) ──────────────────────────────────────────
+// Uses the question's keyConcepts array for deterministic concept-level scoring.
+const performSandboxEvaluation = (candidateAnswer, question, nextQuestion, followUpCount) => {
   const answerLower = (candidateAnswer || '').toLowerCase();
-  const topic = (currentQuestion.topic || '').toLowerCase();
-  
-  // Extract key terms based on common topics
-  let keywords = [];
-  if (topic.includes('state') || topic.includes('redux') || topic.includes('context')) {
-    keywords = ['redux', 'context', 'prop', 'render', 'performance', 'store', 'state', 're-render', 'middleware'];
-  } else if (topic.includes('rest') || topic.includes('graphql')) {
-    keywords = ['endpoint', 'graphql', 'query', 'over-fetching', 'under-fetching', 'cache', 'schema', 'rest'];
-  } else if (topic.includes('index') || topic.includes('database')) {
-    keywords = ['index', 'b-tree', 'write', 'read', 'scan', 'performance', 'storage', 'table', 'seek'];
-  } else if (topic.includes('security') || topic.includes('xss') || topic.includes('csrf')) {
-    keywords = ['xss', 'csrf', 'script', 'injection', 'cookie', 'token', 'samesite', 'sanitize'];
-  } else if (topic.includes('loop') || topic.includes('event')) {
-    keywords = ['event', 'loop', 'stack', 'microtask', 'macrotask', 'promise', 'callback', 'queue', 'thread'];
-  } else if (topic.includes('cors')) {
-    keywords = ['cors', 'origin', 'preflight', 'options', 'header', 'browser', 'security'];
-  } else if (topic.includes('virtual dom') || topic.includes('reconciliation') || topic.includes('react')) {
-    keywords = ['virtual', 'dom', 'diffing', 'reconciliation', 'key', 'render', 'list', 'patch'];
-  } else if (topic.includes('idempotent') || topic.includes('status')) {
-    keywords = ['idempotent', 'get', 'put', 'post', 'delete', '201', '400', '500', 'status', 'code'];
-  } else if (topic.includes('flexbox') || topic.includes('grid') || topic.includes('css')) {
-    keywords = ['flexbox', 'grid', 'dimension', 'navbar', 'layout', 'align', 'overlap'];
-  } else if (topic.includes('cache') || topic.includes('system')) {
-    keywords = ['cache', 'redis', 'aside', 'through', 'invalidation', 'ttl', 'database', 'eviction'];
+
+  // Prefer structured keyConcepts; fall back to topic-based heuristic keywords
+  const keywords = (question.keyConcepts && question.keyConcepts.length > 0)
+    ? question.keyConcepts.map(k => k.toLowerCase())
+    : question.idealAnswer
+        .toLowerCase()
+        .replace(/[^a-z\s]/g, '')
+        .split(/\s+/)
+        .filter(w => w.length > 5)
+        .slice(0, 8);
+
+  const coveredConcepts = keywords.filter(w => answerLower.includes(w));
+  const missingConcepts = keywords.filter(w => !answerLower.includes(w));
+
+  // Score: each covered concept is worth an equal share of 100
+  const score = keywords.length > 0
+    ? Math.round((coveredConcepts.length / keywords.length) * 100)
+    : 0;
+
+  // Backend determines transition — LLM has no authority in sandbox mode
+  const MAX_FOLLOW_UPS = 2;
+  const giving_up = isGivingUp(candidateAnswer);
+  const shouldTransition =
+    score >= 60 ||
+    followUpCount >= MAX_FOLLOW_UPS ||
+    giving_up;
+
+  let replyText;
+  if (giving_up) {
+    const hint = missingConcepts.slice(0, 2).join(' and ');
+    replyText = nextQuestion
+      ? `No worries. The key ideas here are ${hint || 'the core concepts'}. Let's move on: ${nextQuestion.question}`
+      : `No worries. The key ideas were ${hint || 'the core concepts'}. That wraps up our session — click "Complete & Evaluate" to see your report!`;
+  } else if (shouldTransition) {
+    replyText = nextQuestion
+      ? `Good. You covered ${coveredConcepts.slice(0, 3).join(', ') || 'the main points'}. Let's move on: ${nextQuestion.question}`
+      : `Good work. That covers all our questions. Click "Complete & Evaluate" to see your feedback report!`;
   } else {
-    keywords = currentQuestion.idealAnswer
-      .toLowerCase()
-      .replace(/[^a-zA-Z\s]/g, '')
-      .split(/\s+/)
-      .filter(w => w.length > 5);
-  }
-
-  // Count matches
-  const matches = keywords.filter(word => answerLower.includes(word));
-  
-  // Calculate a score purely from keyword coverage (0% base + 12% per keyword, capped at 100)
-  const score = Math.min(matches.length * 12, 100);
-
-  // Transition only if the candidate demonstrated at least some relevant knowledge:
-  // Need at least 2 keyword matches AND a descriptive answer (>= 45 chars),
-  // OR at least 4 keyword matches (strong coverage regardless of length).
-  const isTransition = (matches.length >= 2 && answerLower.trim().length >= 45) || matches.length >= 4;
-
-  let replyText = "";
-  if (isTransition) {
-    if (nextQuestion) {
-      replyText = `Understood. You touched on key concepts like ${matches.length > 0 ? matches.slice(0, 3).join(', ') : 'the core mechanisms'}. Let's move on to the next question: ${nextQuestion.question}`;
-    } else {
-      replyText = `Perfect. That wraps up all the questions in our screening list. Thank you for your time. You can now click "Complete & Evaluate" to view your feedback report!`;
-    }
-  } else {
-    replyText = `I see. Could you expand a bit more on this topic? Specifically, how does it relate to ${keywords.slice(0, 2).join(' or ')}?`;
+    const nudge = missingConcepts.slice(0, 2).join(' or ');
+    replyText = `Interesting. Could you expand on ${nudge || 'that concept'} a bit more?`;
   }
 
   return {
     reply: replyText,
-    evaluation: `[SANDBOX MODE - FREE TRIAL] Candidate answer analyzed for keyword overlap. Matches found: ${matches.length > 0 ? matches.join(', ') : 'none'}. Calculated score: ${score}/100.`,
-    decision: isTransition ? 'transition' : 'follow_up',
-    score: score
+    evaluation: `[SANDBOX] Covered: ${coveredConcepts.join(', ') || 'none'}. Missing: ${missingConcepts.join(', ') || 'none'}. Score: ${score}/100.`,
+    decision: shouldTransition ? 'transition' : 'follow_up',
+    score,
+    coveredConcepts,
+    missingConcepts
   };
 };
 
-// 3. Orchestrate Interview Turn (Chat)
+// ─── Routes ───────────────────────────────────────────────────────────────────
+
+// 1. Get reference questions
+app.get('/api/questions', (req, res) => {
+  res.json(readQuestions());
+});
+
+// 2. Save reference questions
+app.post('/api/questions', (req, res) => {
+  const questions = req.body;
+  if (!Array.isArray(questions))
+    return res.status(400).json({ error: 'Invalid data format. Expected an array.' });
+  const success = writeQuestions(questions);
+  if (success) res.json({ message: 'Questions updated successfully.', questions });
+  else res.status(500).json({ error: 'Failed to save questions.' });
+});
+
+// 3. Start a new interview session (frontend calls this once on "Begin Interview")
+// The backend shuffles questions, stores the session, and returns the first question.
+app.post('/api/session/start', (req, res) => {
+  try {
+    const { interviewLength = 3 } = req.body;
+    const allQuestions = readQuestions();
+    if (allQuestions.length === 0)
+      return res.status(400).json({ error: 'No reference questions available. Please add questions first.' });
+
+    const selected = shuffle(allQuestions).slice(0, Math.min(interviewLength, allQuestions.length));
+
+    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const session = {
+      sessionId,
+      currentQuestionIndex: 0,
+      followUpCount: 0,
+      activeQuestions: selected,
+      transcript: [],
+      perQuestionScores: {},
+      startedAt: new Date().toISOString()
+    };
+    sessions.set(sessionId, session);
+
+    // Auto-expire session
+    setTimeout(() => sessions.delete(sessionId), SESSION_TTL_MS);
+
+    const firstQuestion = selected[0];
+    const openingMessage = `Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${firstQuestion.question}`;
+
+    res.json({
+      sessionId,
+      currentQuestionIndex: 0,
+      totalQuestions: selected.length,
+      activeQuestions: selected,
+      currentQuestion: firstQuestion,
+      openingMessage
+    });
+  } catch (err) {
+    console.error('Session start error:', err);
+    res.status(500).json({ error: err.message || 'Failed to start interview session.' });
+  }
+});
+
+// 4. Orchestrate a single interview turn (Chat)
+// Frontend sends only { sessionId, candidateAnswer }.
+// Backend owns all state: question index, follow-up count, scoring.
 app.post('/api/chat', async (req, res) => {
   try {
-    const { messages, currentQuestionIndex, interviewLength, activeQuestions } = req.body;
-    const questions = activeQuestions || readQuestions();
-    const len = questions.length;
+    const { sessionId, candidateAnswer } = req.body;
 
-    if (questions.length === 0) {
-      return res.status(400).json({ error: 'No reference questions available. Please add questions first.' });
-    }
+    if (!sessionId || !sessions.has(sessionId))
+      return res.status(400).json({ error: 'Invalid or expired session. Please restart the interview.' });
 
-    if (currentQuestionIndex < 0 || currentQuestionIndex >= len) {
-      return res.status(400).json({ error: 'Invalid question index.' });
-    }
+    if (!candidateAnswer || !candidateAnswer.trim())
+      return res.status(400).json({ error: 'Candidate answer cannot be empty.' });
 
-    const currentQuestion = questions[currentQuestionIndex];
-    const nextQuestion = currentQuestionIndex + 1 < len ? questions[currentQuestionIndex + 1] : null;
+    const session = sessions.get(sessionId);
+    const { currentQuestionIndex, followUpCount, activeQuestions } = session;
 
-    // Check for OpenAI API Key, fallback to local sandbox mode if not configured
-    let openai;
-    let sandboxMode = false;
-    try {
-      openai = getOpenAIClient(req);
-    } catch (err) {
-      sandboxMode = true;
-    }
+    if (currentQuestionIndex >= activeQuestions.length)
+      return res.status(400).json({ error: 'Interview already completed.' });
 
-    // Get the latest candidate message text
-    const latestUserMessage = messages
-      .filter(m => m.role === 'user')
-      .slice(-1)[0]?.content || '';
+    const currentQuestion = activeQuestions[currentQuestionIndex];
+    const nextQuestion = currentQuestionIndex + 1 < activeQuestions.length
+      ? activeQuestions[currentQuestionIndex + 1]
+      : null;
+
+    // Append candidate turn to dialogue transcript
+    session.transcript.push({ role: 'user', content: candidateAnswer });
+
+    // ── Sandbox Mode (no API key) ──
+    let openai, sandboxMode = false;
+    try { openai = getOpenAIClient(req); } catch { sandboxMode = true; }
 
     if (sandboxMode) {
-      const result = performSandboxEvaluation(latestUserMessage, currentQuestion, nextQuestion);
+      const result = performSandboxEvaluation(candidateAnswer, currentQuestion, nextQuestion, followUpCount);
+
+      // Accumulate score for this question
+      session.perQuestionScores[currentQuestion.id] = {
+        score: result.score,
+        coveredConcepts: result.coveredConcepts,
+        missingConcepts: result.missingConcepts
+      };
+
+      // Advance state on transition
+      if (result.decision === 'transition') {
+        session.currentQuestionIndex += 1;
+        session.followUpCount = 0;
+      } else {
+        session.followUpCount += 1;
+      }
+
+      session.transcript.push({ role: 'assistant', content: result.reply });
+
       return res.json({
         reply: result.reply,
         evaluation: result.evaluation,
         decision: result.decision,
+        score: result.score,
+        coveredConcepts: result.coveredConcepts,
+        missingConcepts: result.missingConcepts,
+        currentQuestionIndex: session.currentQuestionIndex,
+        followUpCount: session.followUpCount,
         groundedQuestion: currentQuestion
       });
     }
 
-    // Format conversation history for prompt
-    const historyText = messages
-      .slice(-6) // Only look at last few messages to stay fast and direct
+    // ── LLM Mode ──
+    // Detect give-up so backend can force a transition regardless of LLM decision
+    const candidateGaveUp = isGivingUp(candidateAnswer);
+
+    // MAX follow-ups per question — backend enforces this ceiling
+    const MAX_FOLLOW_UPS = 2;
+    const forceTransition = followUpCount >= MAX_FOLLOW_UPS || candidateGaveUp;
+
+    // Build a clean dialogue excerpt (last 6 turns only to keep prompt lean)
+    const historyText = session.transcript
+      .slice(-6)
       .map(m => `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`)
       .join('\n');
 
-    const systemPrompt = `You are a professional, friendly, and seasoned technical interviewer conducting a mock screen for a Software Engineer position.
-You are interacting with the candidate via VOICE, so your replies MUST be natural, conversational, and concise (2-4 sentences max). Avoid lists, bullet points, or markdown formatting, as they are hard to read aloud.
-Do NOT read the ideal reference answer to the candidate verbatim. You must never leak or quote it directly.
+    // Key concepts are injected as the primary grounding signal.
+    // The full idealAnswer is intentionally withheld from the prompt to prevent leakage.
+    const keyConcepts = (currentQuestion.keyConcepts || []).join(', ');
+    const systemPrompt = `You are a professional, friendly technical interviewer conducting a mock Software Engineer screen.
+Your replies MUST be natural, conversational, and concise (2-4 sentences max). No bullet points or markdown — this is spoken aloud.
+Never reveal, quote, or paraphrase the stored reference answer or evaluation data to the candidate.
+Behave like a professional interviewer: probe with natural questions, do not tutor.
 
-You are grounded in a reference Q&A set.
-Active Question: "${currentQuestion.question}"
-Ideal Reference Answer: "${currentQuestion.idealAnswer}"
-${nextQuestion ? `Next Question (if transitioning): "${nextQuestion.question}"` : 'This is the final question of the interview.'}
+ACTIVE QUESTION: "${currentQuestion.question}"
+TOPIC: ${currentQuestion.topic}
+KEY CONCEPTS TO ASSESS: ${keyConcepts}
+FOLLOW-UPS USED SO FAR: ${followUpCount} of ${MAX_FOLLOW_UPS}
+${nextQuestion ? `NEXT QUESTION (use only when transitioning): "${nextQuestion.question}"` : 'This is the FINAL question.'}
+${forceTransition ? 'INSTRUCTION: The follow-up limit has been reached or the candidate gave up. You MUST set decision to "transition". Briefly acknowledge their answer, state the key concept they missed (without reading the reference), and move on.' : ''}
 
-Your task:
-1. Evaluate the candidate's last answer against the Ideal Reference Answer.
-2. Decide on the next step:
-   - "follow_up": If the candidate missed key concepts or has minor errors, ask a natural, conversational follow-up to nudge or guide them without giving the answer away directly. Keep them on track.
-   - "transition": If they answered well, OR if they are completely stuck/wrong (in which case, briefly explain the correct concept yourself), OR if you have already asked a follow-up and want to move on.
-3. If you decide to "transition":
-   - Your reply must acknowledge their previous answer, briefly state the key takeaway if necessary, and then transition naturally to the Next Question (if one is available).
-   - If no questions remain, warmly conclude the interview and tell them they can view their feedback dashboard now.
-
-Provide your response in strict JSON format:
+Evaluate the candidate's answer against the key concepts. Return STRICT JSON:
 {
-  "reply": "Your spoken reply to the candidate (2-4 sentences max, clean conversational text)",
-  "evaluation": "Internal evaluation of their response against the ideal answer. Note what was correct and what was missing.",
-  "decision": "follow_up" or "transition"
+  "reply": "Your spoken reply (2-4 sentences, no markdown)",
+  "evaluation": "Internal notes: which key concepts were covered and which were missed.",
+  "decision": "follow_up" or "transition",
+  "score": <integer 0-100 reflecting concept coverage>,
+  "coveredConcepts": ["concept1", "concept2"],
+  "missingConcepts": ["concept3", "concept4"]
 }`;
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Here is the interview flow so far:\n${historyText}\nPlease evaluate the latest candidate turn and reply.` }
+        { role: 'user', content: `Interview so far:\n${historyText}\n\nEvaluate the latest candidate turn and respond.` }
       ],
       response_format: { type: 'json_object' }
     });
 
-    const result = JSON.parse(response.choices[0].message.content);
-    
-    // Send back the response, evaluation, and which question it was grounded on
-    res.json({
-      reply: result.reply,
-      evaluation: result.evaluation,
-      decision: result.decision,
+    const llmResult = JSON.parse(response.choices[0].message.content);
+
+    // ── Backend transition authority ──
+    // The LLM recommends, but the backend decides based on hard rules.
+    const llmScore = Math.max(0, Math.min(100, Number(llmResult.score) || 0));
+    let finalDecision;
+    if (forceTransition) {
+      finalDecision = 'transition';
+    } else if (llmScore >= 80) {
+      finalDecision = 'transition'; // Strong answer → move on
+    } else {
+      finalDecision = llmResult.decision === 'transition' ? 'transition' : 'follow_up';
+    }
+
+    const coveredConcepts = Array.isArray(llmResult.coveredConcepts) ? llmResult.coveredConcepts : [];
+    const missingConcepts = Array.isArray(llmResult.missingConcepts) ? llmResult.missingConcepts : [];
+
+    // Accumulate per-question score (take best score seen across follow-ups)
+    const existing = session.perQuestionScores[currentQuestion.id];
+    if (!existing || llmScore > existing.score) {
+      session.perQuestionScores[currentQuestion.id] = {
+        score: llmScore,
+        coveredConcepts,
+        missingConcepts
+      };
+    }
+
+    // Advance session state
+    if (finalDecision === 'transition') {
+      session.currentQuestionIndex += 1;
+      session.followUpCount = 0;
+    } else {
+      session.followUpCount += 1;
+    }
+
+    session.transcript.push({ role: 'assistant', content: llmResult.reply });
+
+    return res.json({
+      reply: llmResult.reply,
+      evaluation: llmResult.evaluation,
+      decision: finalDecision,
+      score: llmScore,
+      coveredConcepts,
+      missingConcepts,
+      currentQuestionIndex: session.currentQuestionIndex,
+      followUpCount: session.followUpCount,
       groundedQuestion: currentQuestion
     });
 
@@ -272,30 +391,21 @@ Provide your response in strict JSON format:
   }
 });
 
-// 4. Speech-to-Text (STT) using Whisper
+// 5. Speech-to-Text (STT) — unchanged
 app.post('/api/stt', upload.single('audio'), async (req, res) => {
   const filePath = req.file?.path;
-  if (!filePath) {
-    return res.status(400).json({ error: 'No audio file uploaded.' });
-  }
-
+  if (!filePath) return res.status(400).json({ error: 'No audio file uploaded.' });
   try {
     let openai;
-    try {
-      openai = getOpenAIClient(req);
-    } catch (err) {
-      fs.unlinkSync(filePath); // clean up
+    try { openai = getOpenAIClient(req); } catch (err) {
+      fs.unlinkSync(filePath);
       return res.status(401).json({ error: err.message });
     }
-
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(filePath),
-      model: 'whisper-1',
+      model: 'whisper-1'
     });
-
-    // Clean up uploaded file
     fs.unlinkSync(filePath);
-
     res.json({ text: transcription.text });
   } catch (error) {
     console.error('STT error:', error);
@@ -304,29 +414,17 @@ app.post('/api/stt', upload.single('audio'), async (req, res) => {
   }
 });
 
-// 5. Text-to-Speech (TTS) using OpenAI TTS
+// 6. Text-to-Speech (TTS) — unchanged
 app.post('/api/tts', async (req, res) => {
   try {
     const { text, voice = 'alloy' } = req.body;
-    if (!text) {
-      return res.status(400).json({ error: 'No text provided for TTS.' });
-    }
-
+    if (!text) return res.status(400).json({ error: 'No text provided for TTS.' });
     let openai;
-    try {
-      openai = getOpenAIClient(req);
-    } catch (err) {
+    try { openai = getOpenAIClient(req); } catch (err) {
       return res.status(401).json({ error: err.message });
     }
-
-    const mp3 = await openai.audio.speech.create({
-      model: 'tts-1',
-      voice: voice, // alloy, echo, fable, onyx, nova, shimmer
-      input: text,
-    });
-
+    const mp3 = await openai.audio.speech.create({ model: 'tts-1', voice, input: text });
     const buffer = Buffer.from(await mp3.arrayBuffer());
-    
     res.setHeader('Content-Type', 'audio/mpeg');
     res.send(buffer);
   } catch (error) {
@@ -335,125 +433,141 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
-// 6. Generate Interview Feedback Report
+// 7. Generate Interview Feedback Report
+// Uses accumulated per-question scores from the session when available.
 app.post('/api/feedback', async (req, res) => {
   try {
-    const { messages, interviewLength, activeQuestions } = req.body;
-    const questions = activeQuestions || readQuestions();
+    const { sessionId, messages, activeQuestions } = req.body;
+
+    // Prefer session data for accumulated scores; fall back to legacy payload
+    const session = sessionId ? sessions.get(sessionId) : null;
+    const questions = (session?.activeQuestions) || activeQuestions || readQuestions();
     const len = questions.length;
 
-    // Check for OpenAI API Key, fallback to local sandbox mode if not configured
-    let openai;
-    let sandboxMode = false;
-    try {
-      openai = getOpenAIClient(req);
-    } catch (err) {
-      sandboxMode = true;
-    }
+    let openai, sandboxMode = false;
+    try { openai = getOpenAIClient(req); } catch { sandboxMode = true; }
 
     if (sandboxMode) {
-      // Generate a mock report based on keyword matching
       const questionBreakdown = [];
       let totalScore = 0;
 
-      // Extract user messages
-      const userAnswers = messages
-        .filter(m => m.role === 'user')
-        .map(m => m.content);
+      // Use transcript from session if available, fall back to messages from body
+      const dialogueMessages = session?.transcript || messages || [];
+      const userAnswers = dialogueMessages.filter(m => m.role === 'user').map(m => m.content);
 
       for (let i = 0; i < len; i++) {
         const question = questions[i];
-        const candidateAnswer = userAnswers[i] || "No response recorded.";
-        
-        // Evaluate candidate answer using sandbox engine
-        const evalResult = performSandboxEvaluation(candidateAnswer, question, null);
-        
-        // Use the raw score directly — no inflation
-        const finalScore = evalResult.score;
+        const candidateAnswer = userAnswers[i] || 'No response recorded.';
+
+        // Use accumulated session score if available, otherwise re-evaluate
+        const accumulated = session?.perQuestionScores?.[question.id];
+        let finalScore, coveredConcepts, missingConcepts;
+
+        if (accumulated) {
+          finalScore = accumulated.score;
+          coveredConcepts = accumulated.coveredConcepts;
+          missingConcepts = accumulated.missingConcepts;
+        } else {
+          const evalResult = performSandboxEvaluation(candidateAnswer, question, null, 0);
+          finalScore = evalResult.score;
+          coveredConcepts = evalResult.coveredConcepts;
+          missingConcepts = evalResult.missingConcepts;
+        }
 
         questionBreakdown.push({
+          questionId: question.id,
           question: question.question,
           topic: question.topic,
-          candidateAnswer: candidateAnswer,
-          referenceAnswer: question.idealAnswer,
+          candidateAnswer,
           score: finalScore,
-          feedback: evalResult.score === 0
-            ? `[SANDBOX MODE] Your answer did not contain any relevant technical keywords for ${question.topic}. Review the reference answer for the expected terminology.`
-            : `[SANDBOX MODE] Your answer matched ${evalResult.score <= 24 ? 'few' : 'some'} terms related to ${question.topic}. Keywords found: ${evalResult.evaluation}`
+          coveredConcepts,
+          missingConcepts,
+          feedback: finalScore === 0
+            ? `[SANDBOX] No relevant technical concepts detected for ${question.topic}. Review the key concepts: ${(question.keyConcepts || []).join(', ')}.`
+            : `[SANDBOX] Covered: ${coveredConcepts.join(', ') || 'none'}. Missing: ${missingConcepts.join(', ') || 'none'}.`
         });
 
         totalScore += finalScore;
       }
 
-      const overallScore = Math.round(totalScore / len);
-      
+      const overallScore = len > 0 ? Math.round(totalScore / len) : 0;
       const strengths = [];
       const improvements = [];
 
       questionBreakdown.forEach(item => {
         if (item.score >= 60) {
-          strengths.push(`Showed solid keyword coverage for ${item.topic}.`);
+          strengths.push(`Solid coverage of ${item.topic} — hit ${item.coveredConcepts.length} key concept(s).`);
         } else if (item.score >= 24) {
-          improvements.push(`Cover more core terminology for ${item.topic}. You touched on some concepts but missed key areas.`);
+          improvements.push(`Partial coverage of ${item.topic}. Missing: ${item.missingConcepts.slice(0, 3).join(', ')}.`);
         } else {
-          improvements.push(`Study ${item.topic} thoroughly — your answer lacked the expected technical vocabulary.`);
+          improvements.push(`Needs study on ${item.topic} — missed most key concepts.`);
         }
       });
 
-      if (strengths.length === 0) strengths.push("Completed the evaluation sequence.");
-      if (improvements.length === 0) improvements.push("Ensure you cover more technical terminology in mock replies.");
+      if (strengths.length === 0) strengths.push('Completed the full evaluation sequence.');
+      if (improvements.length === 0) improvements.push('Ensure answers include more domain-specific terminology.');
 
-      const report = {
+      return res.json({
         overallScore,
-        summary: `[SANDBOX EVALUATION] You completed the interview in Sandbox Mode (without a configured API key). The agent graded your answers dynamically based on keyword matches against our reference database. Your keyword coverage score was ${overallScore}%.`,
+        summary: `[SANDBOX EVALUATION] Completed without an API key. Graded on concept coverage across ${len} question(s). Overall concept coverage score: ${overallScore}%.`,
         strengths,
         improvements,
         questionBreakdown
-      };
-
-      return res.json(report);
+      });
     }
 
-    const conversationText = messages
+    // ── LLM Feedback Mode ──
+    // Build transcript. Prefer session transcript; fall back to messages body.
+    const dialogue = (session?.transcript || messages || [])
       .map(m => `${m.role === 'user' ? 'Candidate' : 'Interviewer'}: ${m.content}`)
       .join('\n');
 
-    const feedbackPrompt = `You are a principal engineer and hiring manager. Review the following transcript of a technical mock interview.
-The interview was grounded in a subset of these questions:
-${JSON.stringify(questions.slice(0, len), null, 2)}
+    // Build per-question score context for the LLM
+    const scoreContext = questions.map(q => {
+      const s = session?.perQuestionScores?.[q.id];
+      return {
+        id: q.id,
+        topic: q.topic,
+        question: q.question,
+        keyConcepts: q.keyConcepts || [],
+        accumulatedScore: s?.score ?? null,
+        coveredConcepts: s?.coveredConcepts ?? [],
+        missingConcepts: s?.missingConcepts ?? []
+      };
+    });
 
-Please analyze the candidate's performance across the entire interview. Focus on:
-1. Core technical accuracy (against the reference answers).
-2. Communication clarity and structure.
-3. How they handled follow-up questions (adaptability).
+    const feedbackPrompt = `You are a principal engineer and hiring manager reviewing a technical mock interview transcript.
+The interview was grounded in these key concepts per question:
+${JSON.stringify(scoreContext, null, 2)}
 
-Return a structured JSON report matching this schema:
+Analyze the candidate's performance. Where per-question scores are provided, use them as a strong signal.
+Focus on: technical accuracy against key concepts, communication clarity, and adaptability to follow-ups.
+
+Return STRICT JSON matching this schema:
 {
-  "overallScore": 82, // Score out of 100
-  "summary": "Warm, constructive summary of the candidate's performance. (3-4 sentences)",
-  "strengths": [
-    "List 2-3 specific areas where the candidate demonstrated strong understanding or skills."
-  ],
-  "improvements": [
-    "List 2-3 specific areas/topics where the candidate was weak or missed important details."
-  ],
+  "overallScore": <0-100>,
+  "summary": "Warm, constructive 3-4 sentence summary.",
+  "strengths": ["2-3 specific strengths"],
+  "improvements": ["2-3 specific areas to improve"],
   "questionBreakdown": [
     {
-      "question": "The question text",
-      "topic": "The topic name",
-      "candidateAnswer": "Summary of the candidate's answer",
-      "referenceAnswer": "The reference answer criteria",
-      "score": 85, // Score out of 100 for this question
-      "feedback": "Specific feedback for this answer, noting what they did well and what they missed."
+      "questionId": "q1",
+      "question": "...",
+      "topic": "...",
+      "candidateAnswer": "Brief summary of what they said",
+      "score": <0-100>,
+      "coveredConcepts": ["concept1"],
+      "missingConcepts": ["concept2"],
+      "feedback": "Specific, constructive feedback."
     }
   ]
 }`;
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o', // Use a stronger model for rich evaluation feedback
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: feedbackPrompt },
-        { role: 'user', content: `Here is the interview transcript:\n${conversationText}\n\nGenerate the feedback report.` }
+        { role: 'user', content: `Interview transcript:\n${dialogue}\n\nGenerate the feedback report.` }
       ],
       response_format: { type: 'json_object' }
     });
@@ -467,12 +581,10 @@ Return a structured JSON report matching this schema:
   }
 });
 
-// Serve static files from the React app build folder if it exists
+// ─── Static File Serving ──────────────────────────────────────────────────────
 const frontendBuildPath = path.join(__dirname, '../frontend/dist');
 if (fs.existsSync(frontendBuildPath)) {
   app.use(express.static(frontendBuildPath));
-  
-  // Handle SPA routing - return index.html for all other non-API routes
   app.get('*', (req, res, next) => {
     if (!req.path.startsWith('/api')) {
       res.sendFile(path.join(frontendBuildPath, 'index.html'));
@@ -482,29 +594,25 @@ if (fs.existsSync(frontendBuildPath)) {
   });
 }
 
-// Start Server
+// ─── Start Server ─────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`AegisVoice backend running on http://localhost:${PORT}`);
 });
 
-// Periodic cleanup of temp uploads (older than 1 hour)
+// ─── Periodic Cleanup ─────────────────────────────────────────────────────────
 setInterval(() => {
   try {
     if (fs.existsSync(UPLOAD_DIR)) {
-      const files = fs.readdirSync(UPLOAD_DIR);
       const now = Date.now();
-      files.forEach(file => {
+      fs.readdirSync(UPLOAD_DIR).forEach(file => {
         const filePath = path.join(UPLOAD_DIR, file);
-        const stats = fs.statSync(filePath);
-        // 1 hour = 3600000 ms
-        if (now - stats.mtimeMs > 3600000) {
+        if (now - fs.statSync(filePath).mtimeMs > 3600000) {
           fs.unlinkSync(filePath);
-          console.log(`[CLEANUP] Deleted stale upload file: ${file}`);
+          console.log(`[CLEANUP] Deleted stale upload: ${file}`);
         }
       });
     }
-  } catch (error) {
-    console.error('[CLEANUP] Error cleaning stale upload files:', error);
+  } catch (err) {
+    console.error('[CLEANUP] Error:', err);
   }
-}, 600000); // Check every 10 minutes
-
+}, 600000);

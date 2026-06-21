@@ -18,6 +18,8 @@ function App() {
   const [interviewLength, setInterviewLength] = useState(3);
   const [messages, setMessages] = useState([]);
   const [activeQuestions, setActiveQuestions] = useState([]);
+  const [sessionId, setSessionId] = useState(null);          // server-side session token
+  const [sessionFollowUpCount, setSessionFollowUpCount] = useState(0); // mirrors backend state for UI
   
   // API settings
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('openai_api_key') || '');
@@ -55,6 +57,10 @@ function App() {
   // Feedback states
   const [feedbackReport, setFeedbackReport] = useState(null);
   const [expandedFeedbackQuestion, setExpandedFeedbackQuestion] = useState(null);
+
+  // Latest concept coverage from grounding engine (shown in sidebar)
+  const [latestCoveredConcepts, setLatestCoveredConcepts] = useState([]);
+  const [latestMissingConcepts, setLatestMissingConcepts] = useState([]);
 
   // Modals
   const [showSettingsModal, setShowSettingsModal] = useState(false);
@@ -594,44 +600,53 @@ function App() {
 
   // --- INTERVIEW FLOW AND EVALUATION ---
 
-  const startInterview = () => {
+  const startInterview = async () => {
     if (questions.length === 0) {
       setErrorMessage('Reference Q&A set is empty. Please add questions first.');
       return;
     }
-    
     setErrorMessage('');
-    
-    // Shuffle helper (Fisher-Yates)
-    const shuffled = [...questions];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
-    
-    const selectedQuestions = shuffled.slice(0, Math.min(interviewLength, questions.length));
-    setActiveQuestions(selectedQuestions);
-    
-    setCurrentQuestionIndex(0);
-    setMessages([
-      { 
-        role: 'assistant', 
-        content: `Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${selectedQuestions[0].question}` 
+    setIsThinking(true);
+
+    try {
+      // Ask the backend to create a session: it shuffles questions and owns all state
+      const res = await fetch(`${API_BASE_URL}/api/session/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ interviewLength })
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to start session.');
       }
-    ]);
-    
-    setCurrentScreen('interview');
-    
-    // Wait a brief moment for layout/screen to render then play audio
-    setTimeout(() => {
-      playVoice(`Hello! Welcome to your mock interview. I am your practice agent today, and we'll be reviewing some core software engineering concepts. Let's begin with our first question. ${selectedQuestions[0].question}`);
-    }, 400);
+
+      const data = await res.json();
+      setSessionId(data.sessionId);
+      setActiveQuestions(data.activeQuestions);
+      setCurrentQuestionIndex(0);
+      setSessionFollowUpCount(0);
+      setLatestCoveredConcepts([]);
+      setLatestMissingConcepts([]);
+      setMessages([{ role: 'assistant', content: data.openingMessage }]);
+      setCurrentScreen('interview');
+
+      setTimeout(() => playVoice(data.openingMessage), 400);
+    } catch (err) {
+      setErrorMessage(err.message);
+    } finally {
+      setIsThinking(false);
+    }
   };
 
   const submitCandidateAnswer = async (answerText) => {
     if (!answerText.trim()) return;
+    if (!sessionId) {
+      setErrorMessage('No active session. Please return to Home and start a new interview.');
+      return;
+    }
 
-    // 1. Add user answer to chat
+    // Add user answer to dialogue (display only)
     const updatedMessages = [...messages, { role: 'user', content: answerText }];
     setMessages(updatedMessages);
     setIsThinking(true);
@@ -639,19 +654,11 @@ function App() {
     setTextAnswer('');
 
     try {
-      // 2. Query chat endpoint
+      // Send only sessionId + candidateAnswer — backend owns all state
       const res = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          messages: updatedMessages,
-          currentQuestionIndex,
-          interviewLength,
-          activeQuestions
-        })
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ sessionId, candidateAnswer: answerText })
       });
 
       if (!res.ok) {
@@ -661,7 +668,14 @@ function App() {
 
       const result = await res.json();
 
-      // 3. Update messages with evaluation insights and reply
+      // Update concept coverage for grounding panel
+      setLatestCoveredConcepts(result.coveredConcepts || []);
+      setLatestMissingConcepts(result.missingConcepts || []);
+      setSessionFollowUpCount(result.followUpCount ?? 0);
+
+      // Sync the frontend question index with backend's authoritative value
+      setCurrentQuestionIndex(result.currentQuestionIndex ?? currentQuestionIndex);
+
       setMessages(prev => [
         ...prev,
         {
@@ -673,22 +687,11 @@ function App() {
       ]);
 
       setIsThinking(false);
-
-      // Play the interviewer's reply
       playVoice(result.reply);
 
-      // 4. Handle State Transition
-      if (result.decision === 'transition') {
-        const nextIndex = currentQuestionIndex + 1;
-        const totalQuestionsToAsk = activeQuestions.length;
-
-        if (nextIndex < totalQuestionsToAsk) {
-          // Transition to next question
-          setCurrentQuestionIndex(nextIndex);
-        } else {
-          // Interview is completed
-          setStatusText('Idle');
-        }
+      // If backend completed all questions, clear status
+      if (result.decision === 'transition' && result.currentQuestionIndex >= activeQuestions.length) {
+        setStatusText('Idle');
       }
     } catch (err) {
       setErrorMessage(err.message);
@@ -713,13 +716,10 @@ function App() {
     try {
       const res = await fetch(`${API_BASE_URL}/api/feedback`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
         body: JSON.stringify({
-          messages,
-          interviewLength,
+          sessionId,        // lets backend use accumulated per-question scores
+          messages,         // legacy fallback if no session
           activeQuestions
         })
       });
@@ -1098,29 +1098,74 @@ function App() {
                 <div className="grounding-section">
                   <div className="grounding-section-title">Active Grounding Node</div>
                   <div className="grounding-section-body" style={{ fontWeight: '600', color: 'var(--color-secondary)', fontSize: '0.85rem' }}>
-                    Q{currentQuestionIndex + 1}: {activeQuestions[currentQuestionIndex]?.topic || 'Loading...'}
+                    Q{Math.min(currentQuestionIndex + 1, activeQuestions.length)}: {activeQuestions[Math.min(currentQuestionIndex, activeQuestions.length - 1)]?.topic || 'Loading...'}
                   </div>
                 </div>
 
                 <div className="grounding-section">
                   <div className="grounding-section-title">Reference Question</div>
                   <div className="grounding-section-body">
-                    "{activeQuestions[currentQuestionIndex]?.question}"
+                    "{activeQuestions[Math.min(currentQuestionIndex, activeQuestions.length - 1)]?.question}"
                   </div>
                 </div>
 
-                <div className="grounding-section">
-                  <div className="grounding-section-title">Ideal Reference Answer (Target Keywords)</div>
-                  <div className="grounding-section-body" style={{ fontSize: '0.825rem', color: 'var(--text-muted)' }}>
-                    {activeQuestions[currentQuestionIndex]?.idealAnswer}
+                {/* Key Concepts — the primary grounding signal */}
+                {activeQuestions[Math.min(currentQuestionIndex, activeQuestions.length - 1)]?.keyConcepts?.length > 0 && (
+                  <div className="grounding-section">
+                    <div className="grounding-section-title">Key Concepts to Cover</div>
+                    <div className="grounding-section-body" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.25rem' }}>
+                      {activeQuestions[Math.min(currentQuestionIndex, activeQuestions.length - 1)].keyConcepts.map((c, i) => (
+                        <span key={i} style={{
+                          fontSize: '0.7rem', padding: '0.15rem 0.5rem',
+                          borderRadius: '999px', border: '1px solid var(--border-color)',
+                          color: 'var(--text-muted)', background: 'rgba(255,255,255,0.04)'
+                        }}>{c}</span>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
 
-                {/* Latest Evaluation from backend */}
-                {messages.length > 0 && messages[messages.length - 1].evaluation && (
+                {/* Live concept coverage after each answer */}
+                {(latestCoveredConcepts.length > 0 || latestMissingConcepts.length > 0) && (
                   <div className="grounding-section" style={{ borderLeft: '3px solid var(--color-accent)' }}>
-                    <div className="grounding-section-title" style={{ color: 'var(--color-accent)' }}>Real-Time Assessment</div>
-                    <div className="grounding-section-body" style={{ fontSize: '0.85rem' }}>
+                    <div className="grounding-section-title" style={{ color: 'var(--color-accent)' }}>Concept Coverage</div>
+                    {latestCoveredConcepts.length > 0 && (
+                      <div style={{ marginTop: '0.4rem' }}>
+                        <div style={{ fontSize: '0.68rem', color: 'var(--success)', fontWeight: '600', marginBottom: '0.25rem' }}>✓ COVERED</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+                          {latestCoveredConcepts.map((c, i) => (
+                            <span key={i} style={{ fontSize: '0.7rem', padding: '0.15rem 0.45rem', borderRadius: '999px', background: 'rgba(16,185,129,0.12)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)' }}>{c}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {latestMissingConcepts.length > 0 && (
+                      <div style={{ marginTop: '0.4rem' }}>
+                        <div style={{ fontSize: '0.68rem', color: '#f87171', fontWeight: '600', marginBottom: '0.25rem' }}>✗ MISSING</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+                          {latestMissingConcepts.map((c, i) => (
+                            <span key={i} style={{ fontSize: '0.7rem', padding: '0.15rem 0.45rem', borderRadius: '999px', background: 'rgba(248,113,113,0.1)', color: '#f87171', border: '1px solid rgba(248,113,113,0.3)' }}>{c}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Follow-up counter */}
+                <div className="grounding-section">
+                  <div className="grounding-section-title">Follow-up Budget</div>
+                  <div className="grounding-section-body" style={{ fontSize: '0.8rem' }}>
+                    {sessionFollowUpCount} / 2 used
+                    {sessionFollowUpCount >= 2 && <span style={{ color: 'var(--color-accent)', marginLeft: '0.5rem', fontSize: '0.7rem' }}>→ will auto-advance</span>}
+                  </div>
+                </div>
+
+                {/* Latest internal evaluation */}
+                {messages.length > 0 && messages[messages.length - 1].evaluation && (
+                  <div className="grounding-section" style={{ borderLeft: '3px solid var(--color-secondary)' }}>
+                    <div className="grounding-section-title" style={{ color: 'var(--color-secondary)' }}>Internal Assessment</div>
+                    <div className="grounding-section-body" style={{ fontSize: '0.82rem' }}>
                       {messages[messages.length - 1].evaluation}
                     </div>
                   </div>
