@@ -147,12 +147,13 @@ const performSandboxEvaluation = (candidateAnswer, currentQuestion, nextQuestion
   // Count matches
   const matches = keywords.filter(word => answerLower.includes(word));
   
-  // Calculate a score (base 15% + 15% per matched keyword, capped at 100)
-  const score = Math.min(15 + (matches.length * 15), 100);
+  // Calculate a score purely from keyword coverage (0% base + 12% per keyword, capped at 100)
+  const score = Math.min(matches.length * 12, 100);
 
-  // Transition only if the score is >= 60 (at least 3 keywords) AND the answer is descriptive (>= 45 chars),
-  // OR if the candidate answered extremely thoroughly (length > 120 chars).
-  const isTransition = (score >= 60 && answerLower.trim().length >= 45) || answerLower.trim().length > 120;
+  // Transition only if the candidate demonstrated at least some relevant knowledge:
+  // Need at least 2 keyword matches AND a descriptive answer (>= 45 chars),
+  // OR at least 4 keyword matches (strong coverage regardless of length).
+  const isTransition = (matches.length >= 2 && answerLower.trim().length >= 45) || matches.length >= 4;
 
   let replyText = "";
   if (isTransition) {
@@ -367,8 +368,8 @@ app.post('/api/feedback', async (req, res) => {
         // Evaluate candidate answer using sandbox engine
         const evalResult = performSandboxEvaluation(candidateAnswer, question, null);
         
-        // Ensure passing grades feel constructive
-        const finalScore = evalResult.decision === 'transition' ? Math.max(75, evalResult.score) : evalResult.score;
+        // Use the raw score directly — no inflation
+        const finalScore = evalResult.score;
 
         questionBreakdown.push({
           question: question.question,
@@ -376,7 +377,9 @@ app.post('/api/feedback', async (req, res) => {
           candidateAnswer: candidateAnswer,
           referenceAnswer: question.idealAnswer,
           score: finalScore,
-          feedback: `[SANDBOX MODE] Evaluated without an API key. Your answer matched terms related to ${question.topic}. Match feedback: ${evalResult.evaluation}`
+          feedback: evalResult.score === 0
+            ? `[SANDBOX MODE] Your answer did not contain any relevant technical keywords for ${question.topic}. Review the reference answer for the expected terminology.`
+            : `[SANDBOX MODE] Your answer matched ${evalResult.score <= 24 ? 'few' : 'some'} terms related to ${question.topic}. Keywords found: ${evalResult.evaluation}`
         });
 
         totalScore += finalScore;
@@ -388,10 +391,12 @@ app.post('/api/feedback', async (req, res) => {
       const improvements = [];
 
       questionBreakdown.forEach(item => {
-        if (item.score >= 70) {
+        if (item.score >= 60) {
           strengths.push(`Showed solid keyword coverage for ${item.topic}.`);
+        } else if (item.score >= 24) {
+          improvements.push(`Cover more core terminology for ${item.topic}. You touched on some concepts but missed key areas.`);
         } else {
-          improvements.push(`Provide more terminology and details on ${item.topic}.`);
+          improvements.push(`Study ${item.topic} thoroughly — your answer lacked the expected technical vocabulary.`);
         }
       });
 
